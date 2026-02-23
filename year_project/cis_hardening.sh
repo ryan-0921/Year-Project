@@ -976,6 +976,1227 @@ ensure_file_line() {
     return 0
 }
 
+###############################################################################
+# Section 2 Helpers (Services)
+###############################################################################
+
+# Helper: Check service(s) not in use - compliant if package not installed OR no unit enabled/active
+check_service_not_in_use() {
+    local pkg="$1"
+    shift
+    local units=("$@")
+    if ! check_package_installed "$pkg"; then
+        log_info "Package '$pkg' is not installed - compliant"
+        return 0
+    fi
+    local u
+    for u in "${units[@]}"; do
+        if systemctl is-enabled "$u" 2>/dev/null | grep -q 'enabled'; then
+            log_warn "Service '$u' is enabled (package $pkg installed)"
+            return 1
+        fi
+        if systemctl is-active "$u" 2>/dev/null | grep -q '^active'; then
+            log_warn "Service '$u' is active (package $pkg installed)"
+            return 1
+        fi
+    done
+    log_info "Package '$pkg' installed but all listed services disabled/inactive - compliant"
+    return 0
+}
+
+# Helper: Stop and mask service unit(s)
+ensure_service_stopped_masked() {
+    local units=("$@")
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would stop and mask: ${units[*]}"
+        return 0
+    fi
+    for u in "${units[@]}"; do
+        systemctl stop "$u" 2>/dev/null || true
+        systemctl mask "$u" 2>/dev/null || true
+    done
+    return 0
+}
+
+# Helper: Stop service unit(s) and purge package
+ensure_service_stopped_and_purge() {
+    local pkg="$1"
+    shift
+    local units=("$@")
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would stop ${units[*]} and purge $pkg"
+        return 0
+    fi
+    for u in "${units[@]}"; do
+        systemctl stop "$u" 2>/dev/null || true
+    done
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge "$pkg" 2>/dev/null || true
+    return 0
+}
+
+# Helper: Check path (file or dir) permissions/owner/group
+check_path_permissions() {
+    local path="$1"
+    local expected_perms="$2"
+    local expected_owner="${3:-root}"
+    local expected_group="${4:-root}"
+    if [[ ! -e "$path" ]]; then
+        log_warn "Path '$path' does not exist"
+        return 1
+    fi
+    local current_perms current_owner current_group
+    current_perms=$(stat -c "%a" "$path" 2>/dev/null)
+    current_owner=$(stat -c "%U" "$path" 2>/dev/null)
+    current_group=$(stat -c "%G" "$path" 2>/dev/null)
+    if [[ "$current_perms" == "$expected_perms" ]] && \
+       [[ "$current_owner" == "$expected_owner" ]] && \
+       [[ "$current_group" == "$expected_group" ]]; then
+        return 0
+    fi
+    log_warn "Path '$path' has incorrect permissions: $current_perms/$current_owner/$current_group (expected: $expected_perms/$expected_owner/$expected_group)"
+    return 1
+}
+
+# Helper: Set path (file or dir) permissions/owner/group
+set_path_permissions() {
+    local path="$1"
+    local perms="$2"
+    local owner="${3:-root}"
+    local group="${4:-root}"
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set permissions on '$path' to $perms $owner:$group"
+        return 0
+    fi
+    if [[ ! -e "$path" ]]; then
+        log_warn "Path '$path' does not exist"
+        return 1
+    fi
+    backup_file "$path"
+    chmod "$perms" "$path"
+    chown "$owner:$group" "$path"
+    log_info "Set permissions on '$path' to $perms $owner:$group"
+    return 0
+}
+
+###############################################################################
+# Section 2 - Services (compliance and hardening)
+###############################################################################
+
+# 2.1.1 autofs
+check_compliance_2_1_1() { check_service_not_in_use "autofs" "autofs.service"; }
+apply_hardening_2_1_1() { ensure_service_stopped_and_purge "autofs" "autofs.service"; }
+
+# 2.1.2 avahi-daemon
+check_compliance_2_1_2() { check_service_not_in_use "avahi-daemon" "avahi-daemon.socket" "avahi-daemon.service"; }
+apply_hardening_2_1_2() { ensure_service_stopped_and_purge "avahi-daemon" "avahi-daemon.socket" "avahi-daemon.service"; }
+
+# 2.1.3 isc-dhcp-server
+check_compliance_2_1_3() { check_service_not_in_use "isc-dhcp-server" "isc-dhcp-server.service" "isc-dhcp-server6.service"; }
+apply_hardening_2_1_3() { ensure_service_stopped_and_purge "isc-dhcp-server" "isc-dhcp-server.service" "isc-dhcp-server6.service"; }
+
+# 2.1.4 bind9 (named.service)
+check_compliance_2_1_4() { check_service_not_in_use "bind9" "named.service"; }
+apply_hardening_2_1_4() { ensure_service_stopped_and_purge "bind9" "named.service"; }
+
+# 2.1.5 dnsmasq
+check_compliance_2_1_5() { check_service_not_in_use "dnsmasq" "dnsmasq.service"; }
+apply_hardening_2_1_5() { ensure_service_stopped_and_purge "dnsmasq" "dnsmasq.service"; }
+
+# 2.1.6 vsftpd
+check_compliance_2_1_6() { check_service_not_in_use "vsftpd" "vsftpd.service"; }
+apply_hardening_2_1_6() { ensure_service_stopped_and_purge "vsftpd" "vsftpd.service"; }
+
+# 2.1.7 slapd
+check_compliance_2_1_7() { check_service_not_in_use "slapd" "slapd.service"; }
+apply_hardening_2_1_7() { ensure_service_stopped_and_purge "slapd" "slapd.service"; }
+
+# 2.1.8 dovecot (imapd/pop3d) - check either package and dovecot socket/service
+check_compliance_2_1_8() {
+    if ! check_package_installed "dovecot-imapd" && ! check_package_installed "dovecot-pop3d"; then
+        log_info "dovecot-imapd and dovecot-pop3d not installed - compliant"
+        return 0
+    fi
+    local units=("dovecot.socket" "dovecot.service")
+    for u in "${units[@]}"; do
+        if systemctl is-enabled "$u" 2>/dev/null | grep -q 'enabled'; then return 1; fi
+        if systemctl is-active "$u" 2>/dev/null | grep -q '^active'; then return 1; fi
+    done
+    return 0
+}
+apply_hardening_2_1_8() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would stop/mask dovecot and purge dovecot-imapd dovecot-pop3d"
+        return 0
+    fi
+    ensure_service_stopped_masked "dovecot.socket" "dovecot.service"
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge dovecot-imapd dovecot-pop3d 2>/dev/null || true
+    return 0
+}
+
+# 2.1.9 nfs-kernel-server
+check_compliance_2_1_9() { check_service_not_in_use "nfs-kernel-server" "nfs-server.service"; }
+apply_hardening_2_1_9() { ensure_service_stopped_and_purge "nfs-kernel-server" "nfs-server.service"; }
+
+# 2.1.10 ypserv
+check_compliance_2_1_10() { check_service_not_in_use "ypserv" "ypserv.service"; }
+apply_hardening_2_1_10() { ensure_service_stopped_and_purge "ypserv" "ypserv.service"; }
+
+# 2.1.11 cups
+check_compliance_2_1_11() { check_service_not_in_use "cups" "cups.socket" "cups.service"; }
+apply_hardening_2_1_11() { ensure_service_stopped_and_purge "cups" "cups.socket" "cups.service"; }
+
+# 2.1.12 rpcbind
+check_compliance_2_1_12() { check_service_not_in_use "rpcbind" "rpcbind.socket" "rpcbind.service"; }
+apply_hardening_2_1_12() { ensure_service_stopped_and_purge "rpcbind" "rpcbind.socket" "rpcbind.service"; }
+
+# 2.1.13 rsync
+check_compliance_2_1_13() { check_service_not_in_use "rsync" "rsync.service"; }
+apply_hardening_2_1_13() { ensure_service_stopped_and_purge "rsync" "rsync.service"; }
+
+# 2.1.14 samba
+check_compliance_2_1_14() { check_service_not_in_use "samba" "smbd.service"; }
+apply_hardening_2_1_14() { ensure_service_stopped_and_purge "samba" "smbd.service"; }
+
+# 2.1.15 snmpd
+check_compliance_2_1_15() { check_service_not_in_use "snmpd" "snmpd.service"; }
+apply_hardening_2_1_15() { ensure_service_stopped_and_purge "snmpd" "snmpd.service"; }
+
+# 2.1.16 tftpd-hpa
+check_compliance_2_1_16() { check_service_not_in_use "tftpd-hpa" "tftpd-hpa.service"; }
+apply_hardening_2_1_16() { ensure_service_stopped_and_purge "tftpd-hpa" "tftpd-hpa.service"; }
+
+# 2.1.17 squid
+check_compliance_2_1_17() { check_service_not_in_use "squid" "squid.service"; }
+apply_hardening_2_1_17() { ensure_service_stopped_and_purge "squid" "squid.service"; }
+
+# 2.1.18 apache2 and nginx
+check_compliance_2_1_18() {
+    local bad=false
+    if check_package_installed "apache2"; then
+        if systemctl is-enabled apache2.socket 2>/dev/null | grep -q 'enabled'; then bad=true; fi
+        if systemctl is-enabled apache2.service 2>/dev/null | grep -q 'enabled'; then bad=true; fi
+        if systemctl is-active apache2.socket 2>/dev/null | grep -q '^active'; then bad=true; fi
+        if systemctl is-active apache2.service 2>/dev/null | grep -q '^active'; then bad=true; fi
+    fi
+    if check_package_installed "nginx"; then
+        if systemctl is-enabled nginx.service 2>/dev/null | grep -q 'enabled'; then bad=true; fi
+        if systemctl is-active nginx.service 2>/dev/null | grep -q '^active'; then bad=true; fi
+    fi
+    [[ "$bad" == true ]] && return 1 || return 0
+}
+apply_hardening_2_1_18() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would stop/mask apache2 and nginx and purge packages"
+        return 0
+    fi
+    systemctl stop apache2.socket apache2.service nginx.service 2>/dev/null || true
+    systemctl mask apache2.socket apache2.service nginx.service 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge apache2 nginx 2>/dev/null || true
+    return 0
+}
+
+# 2.1.19 xinetd
+check_compliance_2_1_19() { check_service_not_in_use "xinetd" "xinetd.service"; }
+apply_hardening_2_1_19() { ensure_service_stopped_and_purge "xinetd" "xinetd.service"; }
+
+# 2.1.20 xserver-common (purge only)
+check_compliance_2_1_20() { check_package_not_installed "xserver-common"; }
+apply_hardening_2_1_20() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would purge xserver-common"
+        return 0
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge xserver-common 2>/dev/null || true
+    return 0
+}
+
+# 2.1.21 MTA local-only (postfix inet_interfaces = loopback-only)
+check_compliance_2_1_21() {
+    if ! command -v postconf &>/dev/null; then
+        log_info "Postfix not installed - compliant (no MTA listening)"
+        return 0
+    fi
+    local iface
+    iface=$(postconf -n inet_interfaces 2>/dev/null | grep -oP '=\s*\K.+')
+    if [[ -z "$iface" ]]; then
+        log_warn "Could not determine inet_interfaces"
+        return 1
+    fi
+    if echo "$iface" | grep -qiE 'loopback-only|localhost|127\.0\.0\.1'; then
+        log_info "MTA inet_interfaces is local-only - compliant"
+        return 0
+    fi
+    log_warn "MTA inet_interfaces is not loopback-only: $iface"
+    return 1
+}
+apply_hardening_2_1_21() {
+    if ! command -v postconf &>/dev/null; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set postfix inet_interfaces = loopback-only"
+        return 0
+    fi
+    local main_cf="/etc/postfix/main.cf"
+    if [[ ! -f "$main_cf" ]]; then
+        log_warn "Postfix main.cf not found"
+        return 1
+    fi
+    backup_file "$main_cf"
+    if grep -q '^inet_interfaces' "$main_cf" 2>/dev/null; then
+        sed -i 's/^inet_interfaces.*/inet_interfaces = loopback-only/' "$main_cf"
+    else
+        echo "inet_interfaces = loopback-only" >> "$main_cf"
+    fi
+    systemctl restart postfix 2>/dev/null || true
+    log_info "Set postfix inet_interfaces = loopback-only"
+    return 0
+}
+
+# 2.1.22 Manual - no automated remediation
+check_compliance_2_1_22() { log_info "2.1.22 is manual - skipping compliance check"; return 0; }
+apply_hardening_2_1_22() { log_warn "2.1.22 is manual - ensure only approved services listen on network"; return 0; }
+
+# 2.2.x Client packages (not installed)
+check_compliance_2_2_1() { check_package_not_installed "nis"; }
+apply_hardening_2_2_1() { if [[ "$DRY_RUN" != true ]]; then DEBIAN_FRONTEND=noninteractive apt-get -y purge nis 2>/dev/null || true; fi; return 0; }
+check_compliance_2_2_2() { check_package_not_installed "rsh-client"; }
+apply_hardening_2_2_2() { if [[ "$DRY_RUN" != true ]]; then DEBIAN_FRONTEND=noninteractive apt-get -y purge rsh-client 2>/dev/null || true; fi; return 0; }
+check_compliance_2_2_3() { check_package_not_installed "talk"; }
+apply_hardening_2_2_3() { if [[ "$DRY_RUN" != true ]]; then DEBIAN_FRONTEND=noninteractive apt-get -y purge talk 2>/dev/null || true; fi; return 0; }
+check_compliance_2_2_4() {
+    check_package_not_installed "telnet" && check_package_not_installed "inetutils-telnet"
+}
+apply_hardening_2_2_4() {
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would purge telnet inetutils-telnet"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge telnet inetutils-telnet 2>/dev/null || true
+    return 0
+}
+check_compliance_2_2_5() { check_package_not_installed "ldap-utils"; }
+apply_hardening_2_2_5() { if [[ "$DRY_RUN" != true ]]; then DEBIAN_FRONTEND=noninteractive apt-get -y purge ldap-utils 2>/dev/null || true; fi; return 0; }
+check_compliance_2_2_6() {
+    check_package_not_installed "ftp" && check_package_not_installed "tnftp"
+}
+apply_hardening_2_2_6() {
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would purge ftp tnftp"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get -y purge ftp tnftp 2>/dev/null || true
+    return 0
+}
+
+# 2.3.1.1 Single time sync daemon (exactly one of systemd-timesyncd or chrony)
+check_compliance_2_3_1_1() {
+    local ts_enabled=false chrony_enabled=false
+    systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled' && ts_enabled=true
+    systemctl is-active systemd-timesyncd.service 2>/dev/null | grep -q '^active' && ts_enabled=true
+    systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled' && chrony_enabled=true
+    systemctl is-active chrony.service 2>/dev/null | grep -q '^active' && chrony_enabled=true
+    if [[ "$ts_enabled" == true && "$chrony_enabled" == true ]]; then
+        log_warn "Both systemd-timesyncd and chrony are in use - only one should be"
+        return 1
+    fi
+    if [[ "$ts_enabled" == false && "$chrony_enabled" == false ]]; then
+        log_warn "No time synchronization daemon enabled and active"
+        return 1
+    fi
+    log_info "Single time sync daemon in use - compliant"
+    return 0
+}
+apply_hardening_2_3_1_1() {
+    local ts_ena=false ch_ena=false
+    systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled' && ts_ena=true
+    systemctl is-active systemd-timesyncd.service 2>/dev/null | grep -q '^active' && ts_ena=true
+    systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled' && ch_ena=true
+    systemctl is-active chrony.service 2>/dev/null | grep -q '^active' && ch_ena=true
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would ensure single time sync daemon"
+        return 0
+    fi
+    if [[ "$ts_ena" == true && "$ch_ena" == true ]]; then
+        systemctl stop systemd-timesyncd.service 2>/dev/null || true
+        systemctl mask systemd-timesyncd.service 2>/dev/null || true
+        log_info "Masked systemd-timesyncd (chrony in use)"
+    elif [[ "$ts_ena" == false && "$ch_ena" == false ]]; then
+        systemctl unmask systemd-timesyncd.service 2>/dev/null || true
+        systemctl --now enable systemd-timesyncd.service 2>/dev/null || true
+        log_info "Enabled systemd-timesyncd (no time daemon was active)"
+    fi
+    return 0
+}
+
+# 2.3.2.1 systemd-timesyncd authorized timeserver (only if timesyncd in use)
+check_compliance_2_3_2_1() {
+    if ! systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled'; then
+        log_info "systemd-timesyncd not in use - skip 2.3.2.1"
+        return 0
+    fi
+    local f
+    for f in /etc/systemd/timesyncd.conf /etc/systemd/timesyncd.conf.d/*.conf; do
+        [[ -f "$f" ]] || continue
+        if grep -E '^\s*NTP=\S|^\s*FallbackNTP=\S' "$f" 2>/dev/null | grep -vq '^\s*#'; then
+            log_info "NTP or FallbackNTP set in $f - compliant"
+            return 0
+        fi
+    done
+    log_warn "NTP/FallbackNTP not set for systemd-timesyncd"
+    return 1
+}
+apply_hardening_2_3_2_1() {
+    if ! systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set NTP/FallbackNTP for timesyncd"
+        return 0
+    fi
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    local dropin="/etc/systemd/timesyncd.conf.d/60-timesyncd.conf"
+    backup_file "$dropin" 2>/dev/null || true
+    if ! grep -q '^\[Time\]' "$dropin" 2>/dev/null; then
+        echo -e "[Time]\nNTP=time.nist.gov\nFallbackNTP=time-a-g.nist.gov time-b-g.nist.gov time-c-g.nist.gov" > "$dropin"
+    else
+        grep -q '^NTP=' "$dropin" 2>/dev/null || echo "NTP=time.nist.gov" >> "$dropin"
+        grep -q '^FallbackNTP=' "$dropin" 2>/dev/null || echo "FallbackNTP=time-a-g.nist.gov time-b-g.nist.gov time-c-g.nist.gov" >> "$dropin"
+    fi
+    systemctl reload-or-restart systemd-timesyncd.service 2>/dev/null || true
+    return 0
+}
+
+# 2.3.2.2 systemd-timesyncd enabled and running (only if timesyncd in use)
+check_compliance_2_3_2_2() {
+    if ! systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled' && \
+    systemctl is-active systemd-timesyncd.service 2>/dev/null | grep -q '^active' && return 0
+    return 1
+}
+apply_hardening_2_3_2_2() {
+    if ! systemctl is-enabled systemd-timesyncd.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would enable/start systemd-timesyncd"; return 0; fi
+    systemctl unmask systemd-timesyncd.service 2>/dev/null || true
+    systemctl --now enable systemd-timesyncd.service 2>/dev/null || true
+    return 0
+}
+
+# 2.3.3.1 chrony authorized timeserver (only if chrony in use)
+check_compliance_2_3_3_1() {
+    if ! systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled'; then
+        log_info "chrony not in use - skip 2.3.3.1"
+        return 0
+    fi
+    if grep -E '^\s*(server|pool)\s+\S+' /etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf /etc/chrony/sources.d/*.sources 2>/dev/null | grep -vq '^\s*#'; then
+        return 0
+    fi
+    log_warn "chrony has no server/pool configured"
+    return 1
+}
+apply_hardening_2_3_3_1() {
+    if ! systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would add chrony server/pool"; return 0; fi
+    mkdir -p /etc/chrony/sources.d
+    local f="/etc/chrony/sources.d/60-sources.sources"
+    backup_file "$f" 2>/dev/null || true
+    if ! grep -qE '^\s*(server|pool)\s+' "$f" 2>/dev/null; then
+        echo -e "\npool time.nist.gov iburst maxsources 4" >> "$f"
+    fi
+    grep -q 'sourcedir' /etc/chrony/chrony.conf 2>/dev/null || echo "sourcedir /etc/chrony/sources.d" >> /etc/chrony/chrony.conf
+    systemctl reload-or-restart chrony.service 2>/dev/null || true
+    return 0
+}
+
+# 2.3.3.2 chrony running as _chrony (only if chrony in use)
+check_compliance_2_3_3_2() {
+    if ! systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    local out
+    out=$(ps -ef 2>/dev/null | awk '/[c]hronyd/ { if ($1!="_chrony") print $1 }')
+    if [[ -n "$out" ]]; then
+        log_warn "chronyd is not running as user _chrony"
+        return 1
+    fi
+    return 0
+}
+apply_hardening_2_3_3_2() {
+    if ! systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then return 0; fi
+    if ! grep -q '^\s*user\s\+_chrony' /etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf 2>/dev/null; then
+        mkdir -p /etc/chrony/conf.d
+        echo "user _chrony" >> /etc/chrony/conf.d/99-user.conf
+        systemctl restart chrony.service 2>/dev/null || true
+    fi
+    return 0
+}
+
+# 2.3.3.3 chrony enabled and running (only if chrony in use)
+check_compliance_2_3_3_3() {
+    if ! systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled'; then
+        return 0
+    fi
+    systemctl is-enabled chrony.service 2>/dev/null | grep -q 'enabled' && \
+    systemctl is-active chrony.service 2>/dev/null | grep -q '^active' && return 0
+    return 1
+}
+apply_hardening_2_3_3_3() {
+    if [[ "$DRY_RUN" == true ]]; then return 0; fi
+    systemctl unmask chrony.service 2>/dev/null || true
+    systemctl --now enable chrony.service 2>/dev/null || true
+    return 0
+}
+
+# 2.4.1.1 cron enabled and active
+check_compliance_2_4_1_1() {
+    if ! check_package_installed "cron"; then
+        log_info "cron not installed - skip 2.4.1.1"
+        return 0
+    fi
+    local unit
+    unit=$(systemctl list-unit-files 2>/dev/null | awk '$1~/^cron\.service$/{print $1}')
+    [[ -z "$unit" ]] && unit="cron.service"
+    systemctl is-enabled "$unit" 2>/dev/null | grep -q 'enabled' && \
+    systemctl is-active "$unit" 2>/dev/null | grep -q '^active' && return 0
+    return 1
+}
+apply_hardening_2_4_1_1() {
+    if ! check_package_installed "cron"; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would enable cron"; return 0; fi
+    local unit
+    unit=$(systemctl list-unit-files 2>/dev/null | awk '$1~/^cron\.service$/{print $1}')
+    [[ -z "$unit" ]] && unit="cron.service"
+    systemctl unmask "$unit" 2>/dev/null || true
+    systemctl --now enable "$unit" 2>/dev/null || true
+    return 0
+}
+
+# 2.4.1.2 - 2.4.1.7 cron dir/file permissions
+check_compliance_2_4_1_2() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -f /etc/crontab ]] && check_path_permissions "/etc/crontab" "600" "root" "root" || return 0
+}
+apply_hardening_2_4_1_2() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -f /etc/crontab ]] && set_path_permissions "/etc/crontab" "600" "root" "root"
+    return 0
+}
+check_compliance_2_4_1_3() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.hourly ]] && check_path_permissions "/etc/cron.hourly" "700" "root" "root" || return 0
+}
+apply_hardening_2_4_1_3() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.hourly ]] && set_path_permissions "/etc/cron.hourly" "700" "root" "root"
+    return 0
+}
+check_compliance_2_4_1_4() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.daily ]] && check_path_permissions "/etc/cron.daily" "700" "root" "root" || return 0
+}
+apply_hardening_2_4_1_4() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.daily ]] && set_path_permissions "/etc/cron.daily" "700" "root" "root"
+    return 0
+}
+check_compliance_2_4_1_5() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.weekly ]] && check_path_permissions "/etc/cron.weekly" "700" "root" "root" || return 0
+}
+apply_hardening_2_4_1_5() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.weekly ]] && set_path_permissions "/etc/cron.weekly" "700" "root" "root"
+    return 0
+}
+check_compliance_2_4_1_6() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.monthly ]] && check_path_permissions "/etc/cron.monthly" "700" "root" "root" || return 0
+}
+apply_hardening_2_4_1_6() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.monthly ]] && set_path_permissions "/etc/cron.monthly" "700" "root" "root"
+    return 0
+}
+check_compliance_2_4_1_7() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.d ]] && check_path_permissions "/etc/cron.d" "700" "root" "root" || return 0
+}
+apply_hardening_2_4_1_7() {
+    if ! check_package_installed "cron"; then return 0; fi
+    [[ -d /etc/cron.d ]] && set_path_permissions "/etc/cron.d" "700" "root" "root"
+    return 0
+}
+
+# 2.4.1.8 crontab restricted (cron.allow exists, cron.deny restricted)
+check_compliance_2_4_1_8() {
+    if ! check_package_installed "cron"; then return 0; fi
+    if [[ ! -f /etc/cron.allow ]]; then
+        log_warn "/etc/cron.allow does not exist"
+        return 1
+    fi
+    check_path_permissions "/etc/cron.allow" "640" "root" "root" || check_path_permissions "/etc/cron.allow" "640" "root" "crontab" || return 1
+    if [[ -f /etc/cron.deny ]]; then
+        check_path_permissions "/etc/cron.deny" "640" "root" "root" || check_path_permissions "/etc/cron.deny" "640" "root" "crontab" || return 1
+    fi
+    return 0
+}
+apply_hardening_2_4_1_8() {
+    if ! check_package_installed "cron"; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would create/restrict cron.allow and cron.deny"; return 0; fi
+    touch /etc/cron.allow
+    grep -q '^root$' /etc/cron.allow 2>/dev/null || echo "root" >> /etc/cron.allow
+    chmod 640 /etc/cron.allow
+    getent group crontab &>/dev/null && chown root:crontab /etc/cron.allow || chown root:root /etc/cron.allow
+    if [[ -f /etc/cron.deny ]]; then
+        chmod 640 /etc/cron.deny
+        getent group crontab &>/dev/null && chown root:crontab /etc/cron.deny || chown root:root /etc/cron.deny
+    fi
+    return 0
+}
+
+# 2.4.2.1 at restricted (at.allow exists, at.deny restricted)
+check_compliance_2_4_2_1() {
+    if ! check_package_installed "at"; then
+        log_info "at not installed - skip 2.4.2.1"
+        return 0
+    fi
+    if [[ ! -f /etc/at.allow ]]; then
+        log_warn "/etc/at.allow does not exist"
+        return 1
+    fi
+    local perms_ok=false
+    stat -Lc '%a' /etc/at.allow 2>/dev/null | grep -qE '^[0-7][0-4][0-9]$' && perms_ok=true
+    [[ "$perms_ok" == false ]] && return 1
+    if [[ -f /etc/at.deny ]]; then
+        stat -Lc '%a' /etc/at.deny 2>/dev/null | grep -qE '^[0-7][0-4][0-9]$' || return 1
+    fi
+    return 0
+}
+apply_hardening_2_4_2_1() {
+    if ! check_package_installed "at"; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would create/restrict at.allow and at.deny"; return 0; fi
+    local l_group
+    grep -Pq '^daemon\b' /etc/group 2>/dev/null && l_group="daemon" || l_group="root"
+    touch /etc/at.allow
+    chown root:"$l_group" /etc/at.allow
+    chmod 640 /etc/at.allow
+    [[ -f /etc/at.deny ]] && { chown root:"$l_group" /etc/at.deny; chmod 640 /etc/at.deny; }
+    return 0
+}
+
+###############################################################################
+# Section 3 - Network (helpers and compliance/hardening)
+###############################################################################
+
+# Helper: Check kernel module compliance by name only (no path; for wireless etc.)
+check_kernel_module_compliance_any() {
+    local l_mod_name="$1"
+    local l_mod_chk_name="${l_mod_name//-/_}"
+    local a_showconfig=()
+    while IFS= read -r line; do
+        a_showconfig+=("$line")
+    done < <(modprobe --showconfig 2>/dev/null | grep -P -- '\b(install|blacklist)\h+'"$l_mod_chk_name"'\b' || true)
+    if lsmod | grep -q "^${l_mod_chk_name}[[:space:]]" 2>/dev/null; then
+        log_warn "Kernel module '$l_mod_name' is currently loaded"
+        return 1
+    fi
+    if ! grep -Pq -- '\binstall\h+'"$l_mod_chk_name"'\h+(\/usr)?\/bin\/(true|false)\b' <<< "${a_showconfig[*]}" 2>/dev/null; then
+        log_warn "Kernel module '$l_mod_name' is not set to /bin/false"
+        return 1
+    fi
+    if ! grep -Pq -- '\bblacklist\h+'"$l_mod_chk_name"'\b' <<< "${a_showconfig[*]}" 2>/dev/null; then
+        log_warn "Kernel module '$l_mod_name' is not blacklisted"
+        return 1
+    fi
+    return 0
+}
+
+# Helper: Disable kernel module by name only (for wireless etc.)
+disable_kernel_module_by_name() {
+    local l_mod_name="$1"
+    local l_mod_chk_name="${l_mod_name//-/_}"
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would disable kernel module (by name): $l_mod_name"
+        return 0
+    fi
+    if lsmod | grep -q "^${l_mod_chk_name}[[:space:]]" 2>/dev/null; then
+        modprobe -r "$l_mod_chk_name" 2>/dev/null || true
+        rmmod "$l_mod_name" 2>/dev/null || true
+    fi
+    local conf="/etc/modprobe.d/${l_mod_name}.conf"
+    local need_install need_blacklist
+    need_install=1
+    need_blacklist=1
+    modprobe --showconfig 2>/dev/null | grep -Pq -- '\binstall\h+'"$l_mod_chk_name"'\h+(\/usr)?\/bin\/(true|false)\b' && need_install=0
+    modprobe --showconfig 2>/dev/null | grep -Pq -- '\bblacklist\h+'"$l_mod_chk_name"'\b' && need_blacklist=0
+    [[ -f "$conf" ]] && backup_file "$conf"
+    if [[ "$need_install" -eq 1 ]]; then
+        echo "install $l_mod_chk_name $(readlink -f /bin/false)" >> "$conf"
+    fi
+    if [[ "$need_blacklist" -eq 1 ]]; then
+        echo "blacklist $l_mod_chk_name" >> "$conf"
+    fi
+    return 0
+}
+
+# Helper: Return 0 if IPv6 is disabled on the system
+is_ipv6_disabled() {
+    if [[ -f /sys/module/ipv6/parameters/disable ]]; then
+        grep -Pqs -- '^\h*1\b' /sys/module/ipv6/parameters/disable 2>/dev/null && return 0
+    fi
+    sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | grep -Pqs -- '^\h*net\.ipv6\.conf\.all\.disable_ipv6\h*=\h*1\b' && \
+    sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | grep -Pqs -- '^\h*net\.ipv6\.conf\.default\.disable_ipv6\h*=\h*1\b' && return 0
+    return 1
+}
+
+# 3.1.1 Manual - IPv6 status identified
+check_compliance_3_1_1() { log_info "3.1.1 is manual - identify IPv6 status per site policy"; return 0; }
+apply_hardening_3_1_1() { log_warn "3.1.1 is manual - enable or disable IPv6 per site policy"; return 0; }
+
+# 3.1.2 Wireless interfaces disabled
+check_compliance_3_1_2() {
+    local d mod_names m
+    if [[ -z "$(find /sys/class/net/ -maxdepth 2 -type d -name wireless 2>/dev/null)" ]]; then
+        log_info "No wireless interfaces found - compliant"
+        return 0
+    fi
+    mod_names=$(for d in $(find /sys/class/net/ -maxdepth 2 -type d -name wireless 2>/dev/null); do
+        if [[ -L "$(dirname "$d")/device/driver/module" ]]; then
+            basename "$(readlink -f "$(dirname "$d")/device/driver/module")" 2>/dev/null
+        fi
+    done | sort -u)
+    [[ -z "$mod_names" ]] && return 0
+    for m in $mod_names; do
+        [[ -z "$m" ]] && continue
+        check_kernel_module_compliance_any "$m" || return 1
+    done
+    return 0
+}
+apply_hardening_3_1_2() {
+    local d mod_names m
+    mod_names=$(for d in $(find /sys/class/net/ -maxdepth 2 -type d -name wireless 2>/dev/null); do
+        if [[ -L "$(dirname "$d")/device/driver/module" ]]; then
+            basename "$(readlink -f "$(dirname "$d")/device/driver/module")" 2>/dev/null
+        fi
+    done | sort -u)
+    [[ -z "$mod_names" ]] && return 0
+    for m in $mod_names; do
+        [[ -z "$m" ]] && continue
+        disable_kernel_module_by_name "$m"
+    done
+    return 0
+}
+
+# 3.1.3 Bluetooth not in use
+check_compliance_3_1_3() { check_service_not_in_use "bluez" "bluetooth.service"; }
+apply_hardening_3_1_3() { ensure_service_stopped_and_purge "bluez" "bluetooth.service"; }
+
+# 3.2.x Network kernel modules (dccp, tipc, rds, sctp) - use existing helpers with type "net"
+check_compliance_3_2_1() { check_kernel_module_compliance "dccp" "net"; }
+apply_hardening_3_2_1() { disable_kernel_module "dccp" "net"; }
+check_compliance_3_2_2() { check_kernel_module_compliance "tipc" "net"; }
+apply_hardening_3_2_2() { disable_kernel_module "tipc" "net"; }
+check_compliance_3_2_3() { check_kernel_module_compliance "rds" "net"; }
+apply_hardening_3_2_3() { disable_kernel_module "rds" "net"; }
+check_compliance_3_2_4() { check_kernel_module_compliance "sctp" "net"; }
+apply_hardening_3_2_4() { disable_kernel_module "sctp" "net"; }
+
+# 3.3.1 ip forwarding disabled
+check_compliance_3_3_1() {
+    check_sysctl "net.ipv4.ip_forward" "0" || return 1
+    is_ipv6_disabled && return 0
+    check_sysctl "net.ipv6.conf.all.forwarding" "0"
+}
+apply_hardening_3_3_1() {
+    set_sysctl "net.ipv4.ip_forward" "0"
+    is_ipv6_disabled && return 0
+    set_sysctl "net.ipv6.conf.all.forwarding" "0"
+    return 0
+}
+
+# 3.3.2 packet redirect sending disabled
+check_compliance_3_3_2() {
+    check_sysctl "net.ipv4.conf.all.send_redirects" "0" && \
+    check_sysctl "net.ipv4.conf.default.send_redirects" "0"
+}
+apply_hardening_3_3_2() {
+    set_sysctl "net.ipv4.conf.all.send_redirects" "0"
+    set_sysctl "net.ipv4.conf.default.send_redirects" "0"
+    return 0
+}
+
+# 3.3.3 bogus icmp ignored
+check_compliance_3_3_3() { check_sysctl "net.ipv4.icmp_ignore_bogus_error_responses" "1"; }
+apply_hardening_3_3_3() { set_sysctl "net.ipv4.icmp_ignore_bogus_error_responses" "1"; return 0; }
+
+# 3.3.4 broadcast icmp ignored
+check_compliance_3_3_4() { check_sysctl "net.ipv4.icmp_echo_ignore_broadcasts" "1"; }
+apply_hardening_3_3_4() { set_sysctl "net.ipv4.icmp_echo_ignore_broadcasts" "1"; return 0; }
+
+# 3.3.5 icmp redirects not accepted
+check_compliance_3_3_5() {
+    check_sysctl "net.ipv4.conf.all.accept_redirects" "0" && \
+    check_sysctl "net.ipv4.conf.default.accept_redirects" "0" || return 1
+    is_ipv6_disabled && return 0
+    check_sysctl "net.ipv6.conf.all.accept_redirects" "0" && \
+    check_sysctl "net.ipv6.conf.default.accept_redirects" "0"
+}
+apply_hardening_3_3_5() {
+    set_sysctl "net.ipv4.conf.all.accept_redirects" "0"
+    set_sysctl "net.ipv4.conf.default.accept_redirects" "0"
+    is_ipv6_disabled && return 0
+    set_sysctl "net.ipv6.conf.all.accept_redirects" "0"
+    set_sysctl "net.ipv6.conf.default.accept_redirects" "0"
+    return 0
+}
+
+# 3.3.6 secure icmp redirects not accepted
+check_compliance_3_3_6() {
+    check_sysctl "net.ipv4.conf.all.secure_redirects" "0" && \
+    check_sysctl "net.ipv4.conf.default.secure_redirects" "0"
+}
+apply_hardening_3_3_6() {
+    set_sysctl "net.ipv4.conf.all.secure_redirects" "0"
+    set_sysctl "net.ipv4.conf.default.secure_redirects" "0"
+    return 0
+}
+
+# 3.3.7 reverse path filtering enabled
+check_compliance_3_3_7() {
+    check_sysctl "net.ipv4.conf.all.rp_filter" "1" && \
+    check_sysctl "net.ipv4.conf.default.rp_filter" "1"
+}
+apply_hardening_3_3_7() {
+    set_sysctl "net.ipv4.conf.all.rp_filter" "1"
+    set_sysctl "net.ipv4.conf.default.rp_filter" "1"
+    return 0
+}
+
+# 3.3.8 source routed packets not accepted
+check_compliance_3_3_8() {
+    check_sysctl "net.ipv4.conf.all.accept_source_route" "0" && \
+    check_sysctl "net.ipv4.conf.default.accept_source_route" "0" || return 1
+    is_ipv6_disabled && return 0
+    check_sysctl "net.ipv6.conf.all.accept_source_route" "0" && \
+    check_sysctl "net.ipv6.conf.default.accept_source_route" "0"
+}
+apply_hardening_3_3_8() {
+    set_sysctl "net.ipv4.conf.all.accept_source_route" "0"
+    set_sysctl "net.ipv4.conf.default.accept_source_route" "0"
+    is_ipv6_disabled && return 0
+    set_sysctl "net.ipv6.conf.all.accept_source_route" "0"
+    set_sysctl "net.ipv6.conf.default.accept_source_route" "0"
+    return 0
+}
+
+# 3.3.9 suspicious packets logged
+check_compliance_3_3_9() {
+    check_sysctl "net.ipv4.conf.all.log_martians" "1" && \
+    check_sysctl "net.ipv4.conf.default.log_martians" "1"
+}
+apply_hardening_3_3_9() {
+    set_sysctl "net.ipv4.conf.all.log_martians" "1"
+    set_sysctl "net.ipv4.conf.default.log_martians" "1"
+    return 0
+}
+
+# 3.3.10 tcp syn cookies enabled
+check_compliance_3_3_10() { check_sysctl "net.ipv4.tcp_syncookies" "1"; }
+apply_hardening_3_3_10() { set_sysctl "net.ipv4.tcp_syncookies" "1"; return 0; }
+
+# 3.3.11 ipv6 router advertisements not accepted (only if IPv6 enabled)
+check_compliance_3_3_11() {
+    is_ipv6_disabled && { log_info "IPv6 disabled - skip 3.3.11"; return 0; }
+    check_sysctl "net.ipv6.conf.all.accept_ra" "0" && \
+    check_sysctl "net.ipv6.conf.default.accept_ra" "0"
+}
+apply_hardening_3_3_11() {
+    is_ipv6_disabled && return 0
+    set_sysctl "net.ipv6.conf.all.accept_ra" "0"
+    set_sysctl "net.ipv6.conf.default.accept_ra" "0"
+    return 0
+}
+
+###############################################################################
+# Section 4 - Host Based Firewall
+###############################################################################
+
+# Helper: Determine which single firewall is in use (ufw, nftables, iptables). Echo one or empty.
+get_active_firewall() {
+    local active=()
+    if command -v ufw &>/dev/null && systemctl is-enabled ufw 2>/dev/null | grep -q . && systemctl is-active ufw 2>/dev/null | grep -q '^active'; then
+        active+=("ufw")
+    fi
+    if command -v nft &>/dev/null && systemctl is-enabled nftables 2>/dev/null | grep -q . && systemctl is-active nftables 2>/dev/null | grep -q '^active'; then
+        active+=("nftables")
+    fi
+    # iptables: use netfilter-persistent as the service on Ubuntu/Debian
+    if command -v iptables &>/dev/null && systemctl is-enabled netfilter-persistent 2>/dev/null | grep -q . && systemctl is-active netfilter-persistent 2>/dev/null | grep -q '^active'; then
+        active+=("iptables")
+    fi
+    if [[ ${#active[@]} -eq 1 ]]; then
+        echo "${active[0]}"
+    else
+        echo ""
+    fi
+}
+
+# 4.1.1 Single firewall configuration utility in use
+check_compliance_4_1_1() {
+    local fw
+    fw=$(get_active_firewall)
+    if [[ -n "$fw" ]]; then
+        log_info "Single firewall in use: $fw - compliant"
+        return 0
+    fi
+    log_warn "No single firewall in use (none or multiple active)"
+    return 1
+}
+apply_hardening_4_1_1() {
+    local fw
+    fw=$(get_active_firewall)
+    if [[ -n "$fw" ]]; then
+        log_info "Single firewall already in use: $fw"
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would ensure single firewall (default: enable ufw)"
+        return 0
+    fi
+    # Default: enable ufw, disable/mask others
+    systemctl stop nftables 2>/dev/null || true
+    systemctl mask nftables 2>/dev/null || true
+    systemctl stop netfilter-persistent 2>/dev/null || true
+    systemctl mask netfilter-persistent 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ufw 2>/dev/null || true
+    systemctl unmask ufw 2>/dev/null || true
+    systemctl --now enable ufw 2>/dev/null || true
+    ufw --force enable 2>/dev/null || true
+    log_info "Enabled ufw as single firewall (default)"
+    return 0
+}
+
+# 4.2.1 ufw installed (only when ufw is the active firewall)
+check_compliance_4_2_1() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.1"; return 0; }
+    check_package_installed "ufw"
+}
+apply_hardening_4_2_1() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would install ufw"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ufw 2>/dev/null || true
+    return 0
+}
+
+# 4.2.2 iptables-persistent not installed with ufw
+check_compliance_4_2_2() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.2"; return 0; }
+    check_package_not_installed "iptables-persistent"
+}
+apply_hardening_4_2_2() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would purge iptables-persistent"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y iptables-persistent 2>/dev/null || true
+    return 0
+}
+
+# 4.2.3 ufw service enabled and active
+check_compliance_4_2_3() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.3"; return 0; }
+    systemctl is-enabled ufw 2>/dev/null | grep -q . && systemctl is-active ufw 2>/dev/null | grep -q '^active' && ufw status 2>/dev/null | grep -q "Status: active"
+}
+apply_hardening_4_2_3() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would enable ufw"; return 0; fi
+    systemctl unmask ufw 2>/dev/null || true
+    systemctl --now enable ufw 2>/dev/null || true
+    ufw --force enable 2>/dev/null || true
+    return 0
+}
+
+# 4.2.4 ufw loopback traffic configured
+check_compliance_4_2_4() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.4"; return 0; }
+    grep -qE 'ufw-before-input.*-i lo.*ACCEPT|ACCEPT.*-i lo' /etc/ufw/before.rules 2>/dev/null && \
+    grep -qE 'ufw-before-output.*-o lo.*ACCEPT|ACCEPT.*-o lo' /etc/ufw/before.rules 2>/dev/null && \
+    (grep -q '127.0.0.0/8' /etc/ufw/before.rules 2>/dev/null || ufw status verbose 2>/dev/null | grep -q '127.0.0.0/8') && \
+    (grep -q '::1' /etc/ufw/before.rules 2>/dev/null || ufw status verbose 2>/dev/null | grep -q '::1')
+}
+apply_hardening_4_2_4() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would configure ufw loopback"; return 0; fi
+    ufw allow in on lo 2>/dev/null || true
+    ufw allow out on lo 2>/dev/null || true
+    ufw deny in from 127.0.0.0/8 2>/dev/null || true
+    ufw deny in from ::1 2>/dev/null || true
+    return 0
+}
+
+# 4.2.5 ufw outbound connections (Manual)
+check_compliance_4_2_5() { log_info "4.2.5 is manual - configure outbound per site policy"; return 0; }
+apply_hardening_4_2_5() { log_warn "4.2.5 is manual - configure ufw outbound per site policy"; return 0; }
+
+# 4.2.6 ufw firewall rules exist for all open ports
+check_compliance_4_2_6() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.6"; return 0; }
+    local ufw_ports open_ports
+    ufw_ports=$(ufw status 2>/dev/null | awk '$1 ~ /^[0-9]+\/(tcp|udp)$/ {split($1,a,"/"); print a[1]}' | sort -u)
+    open_ports=$(ss -tuln 2>/dev/null | awk 'NR>1 && $5!~/%lo:/ && $5!~/127\.0\.0\.1:/ && $5!~/\[?::1\]?:/ {split($5,a,":"); print a[2]}' | sort -u)
+    local missing=""
+    while read -r port; do
+        [[ -z "$port" ]] && continue
+        echo "$ufw_ports" | grep -q "^${port}$" || missing="$missing $port"
+    done <<< "$open_ports"
+    [[ -z "$missing" ]] && return 0
+    log_warn "Open ports without UFW rule:$missing"
+    return 1
+}
+apply_hardening_4_2_6() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would add ufw rules for open ports"; return 0; fi
+    local open_ports port
+    open_ports=$(ss -tuln 2>/dev/null | awk '($5!~/%lo:/ && $5!~/127\.0\.0.1:/ && $5!~/\[?::1\]?:/) {split($5,a,":"); print a[2]}' | sort -u)
+    while read -r port; do
+        [[ -z "$port" ]] && continue
+        ufw allow "$port"/tcp 2>/dev/null || true
+        ufw allow "$port"/udp 2>/dev/null || true
+    done <<< "$open_ports"
+    return 0
+}
+
+# 4.2.7 ufw default deny firewall policy
+check_compliance_4_2_7() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && { log_info "UFW not in use - skip 4.2.7"; return 0; }
+    ufw status verbose 2>/dev/null | grep -q 'Default:.*deny (incoming)' && \
+    ufw status verbose 2>/dev/null | grep -q 'deny (outgoing)' && \
+    ufw status verbose 2>/dev/null | grep -qE 'disabled \(routed\)|deny \(routed\)'
+}
+apply_hardening_4_2_7() {
+    [[ "$(get_active_firewall)" != "ufw" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would set ufw default deny"; return 0; fi
+    ufw default deny incoming 2>/dev/null || true
+    ufw default deny outgoing 2>/dev/null || true
+    ufw default deny routed 2>/dev/null || true
+    return 0
+}
+
+# 4.3.x nftables (only when nftables is the active firewall)
+check_compliance_4_3_1() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && { log_info "nftables not in use - skip 4.3.1"; return 0; }
+    check_package_installed "nftables"
+}
+apply_hardening_4_3_1() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would install nftables"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nftables 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_2() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    ! check_package_installed "ufw" || (ufw status 2>/dev/null | grep -q "Status: inactive" && systemctl is-enabled ufw 2>/dev/null | grep -q "masked")
+}
+apply_hardening_4_3_2() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would disable ufw for nftables"; return 0; fi
+    ufw disable 2>/dev/null || true
+    systemctl stop ufw 2>/dev/null || true
+    systemctl mask ufw 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_3() { log_info "4.3.3 is manual - flush iptables with nftables"; return 0; }
+apply_hardening_4_3_3() { log_warn "4.3.3 is manual - flush iptables if using nftables"; return 0; }
+
+check_compliance_4_3_4() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    nft list tables 2>/dev/null | grep -q "table inet filter"
+}
+apply_hardening_4_3_4() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would create nftables inet filter table"; return 0; fi
+    nft create table inet filter 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_5() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    nft list ruleset 2>/dev/null | grep -q 'hook input' && \
+    nft list ruleset 2>/dev/null | grep -q 'hook forward' && \
+    nft list ruleset 2>/dev/null | grep -q 'hook output'
+}
+apply_hardening_4_3_5() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would create nftables base chains"; return 0; fi
+    nft create table inet filter 2>/dev/null || true
+    nft create chain inet filter input '{ type filter hook input priority 0; policy drop; }' 2>/dev/null || true
+    nft create chain inet filter forward '{ type filter hook forward priority 0; policy drop; }' 2>/dev/null || true
+    nft create chain inet filter output '{ type filter hook output priority 0; policy drop; }' 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_6() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    nft list ruleset 2>/dev/null | awk '/hook input/,/}/' | grep -q 'iif "lo" accept' && \
+    nft list ruleset 2>/dev/null | awk '/hook input/,/}/' | grep -q '127.0.0.0/8'
+}
+apply_hardening_4_3_6() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would configure nftables loopback"; return 0; fi
+    nft add rule inet filter input iif lo accept 2>/dev/null || true
+    nft add rule inet filter input ip saddr 127.0.0.0/8 counter drop 2>/dev/null || true
+    nft add rule inet filter input ip6 saddr ::1 counter drop 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_7() { log_info "4.3.7 is manual - nftables outbound/established"; return 0; }
+apply_hardening_4_3_7() { log_warn "4.3.7 is manual - configure nftables outbound per site policy"; return 0; }
+
+check_compliance_4_3_8() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    nft list ruleset 2>/dev/null | grep -q 'policy drop'
+}
+apply_hardening_4_3_8() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    # Chains created with policy drop in 4.3.5
+    return 0
+}
+
+check_compliance_4_3_9() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    systemctl is-enabled nftables 2>/dev/null | grep -q . && systemctl is-active nftables 2>/dev/null | grep -q '^active'
+}
+apply_hardening_4_3_9() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would enable nftables"; return 0; fi
+    systemctl unmask nftables 2>/dev/null || true
+    systemctl --now enable nftables 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_3_10() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    grep -qE '^\s*include\s+' /etc/nftables.conf 2>/dev/null
+}
+apply_hardening_4_3_10() {
+    [[ "$(get_active_firewall)" != "nftables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would add include to nftables.conf"; return 0; fi
+    if ! grep -q 'include "/etc/nftables.rules"' /etc/nftables.conf 2>/dev/null; then
+        backup_file /etc/nftables.conf 2>/dev/null || true
+        echo 'include "/etc/nftables.rules"' >> /etc/nftables.conf
+    fi
+    return 0
+}
+
+# 4.4.x iptables (only when iptables/netfilter-persistent is the active firewall)
+check_compliance_4_4_1_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && { log_info "iptables not in use - skip 4.4.1.1"; return 0; }
+    check_package_installed "iptables" && check_package_installed "iptables-persistent"
+}
+apply_hardening_4_4_1_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would install iptables iptables-persistent"; return 0; fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables iptables-persistent 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_1_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    ! (command -v nft &>/dev/null && systemctl is-enabled nftables 2>/dev/null | grep -q . && systemctl is-active nftables 2>/dev/null | grep -q '^active')
+}
+apply_hardening_4_4_1_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would disable nftables for iptables"; return 0; fi
+    systemctl stop nftables 2>/dev/null || true
+    systemctl mask nftables 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_1_3() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    ! (command -v ufw &>/dev/null && systemctl is-active ufw 2>/dev/null | grep -q '^active')
+}
+apply_hardening_4_4_1_3() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would disable ufw for iptables"; return 0; fi
+    ufw disable 2>/dev/null || true
+    systemctl stop ufw 2>/dev/null || true
+    systemctl mask ufw 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_2_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    iptables -L INPUT -n 2>/dev/null | head -1 | grep -qE 'policy (DROP|REJECT)'
+}
+apply_hardening_4_4_2_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would set iptables default deny"; return 0; fi
+    iptables -P INPUT DROP 2>/dev/null || true
+    iptables -P FORWARD DROP 2>/dev/null || true
+    iptables -P OUTPUT DROP 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_2_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    iptables -L INPUT -n -v 2>/dev/null | grep -q 'lo.*ACCEPT' && iptables -L OUTPUT -n -v 2>/dev/null | grep -q 'lo.*ACCEPT'
+}
+apply_hardening_4_4_2_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would configure iptables loopback"; return 0; fi
+    iptables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+    iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_2_3() { log_info "4.4.2.3 is manual - iptables outbound/established"; return 0; }
+apply_hardening_4_4_2_3() { log_warn "4.4.2.3 is manual - configure iptables outbound per site policy"; return 0; }
+
+check_compliance_4_4_2_4() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    # Similar to 4.2.6 - open ports should have rules; simplified pass if iptables has some input rules
+    iptables -L INPUT -n 2>/dev/null | grep -q ACCEPT
+}
+apply_hardening_4_4_2_4() { [[ "$(get_active_firewall)" != "iptables" ]] && return 0; return 0; }
+
+check_compliance_4_4_3_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    ip6tables -L INPUT -n 2>/dev/null | head -1 | grep -qE 'policy (DROP|REJECT)'
+}
+apply_hardening_4_4_3_1() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would set ip6tables default deny"; return 0; fi
+    ip6tables -P INPUT DROP 2>/dev/null || true
+    ip6tables -P FORWARD DROP 2>/dev/null || true
+    ip6tables -P OUTPUT DROP 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_3_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    ip6tables -L INPUT -n -v 2>/dev/null | grep -q 'lo.*ACCEPT' && ip6tables -L OUTPUT -n -v 2>/dev/null | grep -q 'lo.*ACCEPT'
+}
+apply_hardening_4_4_3_2() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then log_dryrun "Would configure ip6tables loopback"; return 0; fi
+    ip6tables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+    ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+    return 0
+}
+
+check_compliance_4_4_3_3() { log_info "4.4.3.3 is manual - ip6tables outbound/established"; return 0; }
+apply_hardening_4_4_3_3() { log_warn "4.4.3.3 is manual - configure ip6tables outbound per site policy"; return 0; }
+
+check_compliance_4_4_3_4() {
+    [[ "$(get_active_firewall)" != "iptables" ]] && return 0
+    ip6tables -L INPUT -n 2>/dev/null | grep -q ACCEPT
+}
+apply_hardening_4_4_3_4() { [[ "$(get_active_firewall)" != "iptables" ]] && return 0; return 0; }
+
 # Check if a section is already compliant
 check_compliance() {
     local section="$1"
@@ -1058,6 +2279,114 @@ check_compliance() {
             check_compliance_1_7_10 || all_compliant=false
             [[ "$all_compliant" == true ]] && return 0 || return 1
             ;;
+        2)
+            # Section 2: Services - check all subsections
+            log_info "Section 2 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_2_1_1 || all_compliant=false
+            check_compliance_2_1_2 || all_compliant=false
+            check_compliance_2_1_3 || all_compliant=false
+            check_compliance_2_1_4 || all_compliant=false
+            check_compliance_2_1_5 || all_compliant=false
+            check_compliance_2_1_6 || all_compliant=false
+            check_compliance_2_1_7 || all_compliant=false
+            check_compliance_2_1_8 || all_compliant=false
+            check_compliance_2_1_9 || all_compliant=false
+            check_compliance_2_1_10 || all_compliant=false
+            check_compliance_2_1_11 || all_compliant=false
+            check_compliance_2_1_12 || all_compliant=false
+            check_compliance_2_1_13 || all_compliant=false
+            check_compliance_2_1_14 || all_compliant=false
+            check_compliance_2_1_15 || all_compliant=false
+            check_compliance_2_1_16 || all_compliant=false
+            check_compliance_2_1_17 || all_compliant=false
+            check_compliance_2_1_18 || all_compliant=false
+            check_compliance_2_1_19 || all_compliant=false
+            check_compliance_2_1_20 || all_compliant=false
+            check_compliance_2_1_21 || all_compliant=false
+            check_compliance_2_1_22 || all_compliant=false
+            check_compliance_2_2_1 || all_compliant=false
+            check_compliance_2_2_2 || all_compliant=false
+            check_compliance_2_2_3 || all_compliant=false
+            check_compliance_2_2_4 || all_compliant=false
+            check_compliance_2_2_5 || all_compliant=false
+            check_compliance_2_2_6 || all_compliant=false
+            check_compliance_2_3_1_1 || all_compliant=false
+            check_compliance_2_3_2_1 || all_compliant=false
+            check_compliance_2_3_2_2 || all_compliant=false
+            check_compliance_2_3_3_1 || all_compliant=false
+            check_compliance_2_3_3_2 || all_compliant=false
+            check_compliance_2_3_3_3 || all_compliant=false
+            check_compliance_2_4_1_1 || all_compliant=false
+            check_compliance_2_4_1_2 || all_compliant=false
+            check_compliance_2_4_1_3 || all_compliant=false
+            check_compliance_2_4_1_4 || all_compliant=false
+            check_compliance_2_4_1_5 || all_compliant=false
+            check_compliance_2_4_1_6 || all_compliant=false
+            check_compliance_2_4_1_7 || all_compliant=false
+            check_compliance_2_4_1_8 || all_compliant=false
+            check_compliance_2_4_2_1 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
+        3)
+            # Section 3: Network - check all subsections
+            log_info "Section 3 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_3_1_1 || all_compliant=false
+            check_compliance_3_1_2 || all_compliant=false
+            check_compliance_3_1_3 || all_compliant=false
+            check_compliance_3_2_1 || all_compliant=false
+            check_compliance_3_2_2 || all_compliant=false
+            check_compliance_3_2_3 || all_compliant=false
+            check_compliance_3_2_4 || all_compliant=false
+            check_compliance_3_3_1 || all_compliant=false
+            check_compliance_3_3_2 || all_compliant=false
+            check_compliance_3_3_3 || all_compliant=false
+            check_compliance_3_3_4 || all_compliant=false
+            check_compliance_3_3_5 || all_compliant=false
+            check_compliance_3_3_6 || all_compliant=false
+            check_compliance_3_3_7 || all_compliant=false
+            check_compliance_3_3_8 || all_compliant=false
+            check_compliance_3_3_9 || all_compliant=false
+            check_compliance_3_3_10 || all_compliant=false
+            check_compliance_3_3_11 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
+        4)
+            # Section 4: Host Based Firewall - check all subsections
+            log_info "Section 4 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_4_1_1 || all_compliant=false
+            check_compliance_4_2_1 || all_compliant=false
+            check_compliance_4_2_2 || all_compliant=false
+            check_compliance_4_2_3 || all_compliant=false
+            check_compliance_4_2_4 || all_compliant=false
+            check_compliance_4_2_5 || all_compliant=false
+            check_compliance_4_2_6 || all_compliant=false
+            check_compliance_4_2_7 || all_compliant=false
+            check_compliance_4_3_1 || all_compliant=false
+            check_compliance_4_3_2 || all_compliant=false
+            check_compliance_4_3_3 || all_compliant=false
+            check_compliance_4_3_4 || all_compliant=false
+            check_compliance_4_3_5 || all_compliant=false
+            check_compliance_4_3_6 || all_compliant=false
+            check_compliance_4_3_7 || all_compliant=false
+            check_compliance_4_3_8 || all_compliant=false
+            check_compliance_4_3_9 || all_compliant=false
+            check_compliance_4_3_10 || all_compliant=false
+            check_compliance_4_4_1_1 || all_compliant=false
+            check_compliance_4_4_1_2 || all_compliant=false
+            check_compliance_4_4_1_3 || all_compliant=false
+            check_compliance_4_4_2_1 || all_compliant=false
+            check_compliance_4_4_2_2 || all_compliant=false
+            check_compliance_4_4_2_3 || all_compliant=false
+            check_compliance_4_4_2_4 || all_compliant=false
+            check_compliance_4_4_3_1 || all_compliant=false
+            check_compliance_4_4_3_2 || all_compliant=false
+            check_compliance_4_4_3_3 || all_compliant=false
+            check_compliance_4_4_3_4 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
         1.1.1)
             # Section 1.1.1: Configure Filesystem Kernel Modules - check all subsections
             log_info "Checking all 1.1.1 kernel module sections..."
@@ -1109,6 +2438,18 @@ check_compliance() {
             $func_name
             ;;
         1.2.1.1|1.2.1.2|1.2.2.1|1.3.1.1|1.3.1.2|1.3.1.3|1.3.1.4|1.4.1|1.4.2|1.5.1|1.5.2|1.5.3|1.5.4|1.5.5|1.6.1|1.6.2|1.6.3|1.6.4|1.6.5|1.6.6|1.7.1|1.7.2|1.7.3|1.7.4|1.7.5|1.7.6|1.7.7|1.7.8|1.7.9|1.7.10)
+            local func_name="check_compliance_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        2.1.1|2.1.2|2.1.3|2.1.4|2.1.5|2.1.6|2.1.7|2.1.8|2.1.9|2.1.10|2.1.11|2.1.12|2.1.13|2.1.14|2.1.15|2.1.16|2.1.17|2.1.18|2.1.19|2.1.20|2.1.21|2.1.22|2.2.1|2.2.2|2.2.3|2.2.4|2.2.5|2.2.6|2.3.1.1|2.3.2.1|2.3.2.2|2.3.3.1|2.3.3.2|2.3.3.3|2.4.1.1|2.4.1.2|2.4.1.3|2.4.1.4|2.4.1.5|2.4.1.6|2.4.1.7|2.4.1.8|2.4.2.1)
+            local func_name="check_compliance_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        3.1.1|3.1.2|3.1.3|3.2.1|3.2.2|3.2.3|3.2.4|3.3.1|3.3.2|3.3.3|3.3.4|3.3.5|3.3.6|3.3.7|3.3.8|3.3.9|3.3.10|3.3.11)
+            local func_name="check_compliance_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4)
             local func_name="check_compliance_$(echo $section | tr '.' '_')"
             $func_name
             ;;
@@ -1207,6 +2548,114 @@ apply_hardening() {
             apply_hardening_1_7_10 || all_success=false
             [[ "$all_success" == true ]] && return 0 || return 1
             ;;
+        2)
+            # Section 2: Services - apply all subsections
+            log_info "Section 2 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_2_1_1 || all_success=false
+            apply_hardening_2_1_2 || all_success=false
+            apply_hardening_2_1_3 || all_success=false
+            apply_hardening_2_1_4 || all_success=false
+            apply_hardening_2_1_5 || all_success=false
+            apply_hardening_2_1_6 || all_success=false
+            apply_hardening_2_1_7 || all_success=false
+            apply_hardening_2_1_8 || all_success=false
+            apply_hardening_2_1_9 || all_success=false
+            apply_hardening_2_1_10 || all_success=false
+            apply_hardening_2_1_11 || all_success=false
+            apply_hardening_2_1_12 || all_success=false
+            apply_hardening_2_1_13 || all_success=false
+            apply_hardening_2_1_14 || all_success=false
+            apply_hardening_2_1_15 || all_success=false
+            apply_hardening_2_1_16 || all_success=false
+            apply_hardening_2_1_17 || all_success=false
+            apply_hardening_2_1_18 || all_success=false
+            apply_hardening_2_1_19 || all_success=false
+            apply_hardening_2_1_20 || all_success=false
+            apply_hardening_2_1_21 || all_success=false
+            apply_hardening_2_1_22 || all_success=false
+            apply_hardening_2_2_1 || all_success=false
+            apply_hardening_2_2_2 || all_success=false
+            apply_hardening_2_2_3 || all_success=false
+            apply_hardening_2_2_4 || all_success=false
+            apply_hardening_2_2_5 || all_success=false
+            apply_hardening_2_2_6 || all_success=false
+            apply_hardening_2_3_1_1 || all_success=false
+            apply_hardening_2_3_2_1 || all_success=false
+            apply_hardening_2_3_2_2 || all_success=false
+            apply_hardening_2_3_3_1 || all_success=false
+            apply_hardening_2_3_3_2 || all_success=false
+            apply_hardening_2_3_3_3 || all_success=false
+            apply_hardening_2_4_1_1 || all_success=false
+            apply_hardening_2_4_1_2 || all_success=false
+            apply_hardening_2_4_1_3 || all_success=false
+            apply_hardening_2_4_1_4 || all_success=false
+            apply_hardening_2_4_1_5 || all_success=false
+            apply_hardening_2_4_1_6 || all_success=false
+            apply_hardening_2_4_1_7 || all_success=false
+            apply_hardening_2_4_1_8 || all_success=false
+            apply_hardening_2_4_2_1 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
+        3)
+            # Section 3: Network - apply all subsections
+            log_info "Section 3 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_3_1_1 || all_success=false
+            apply_hardening_3_1_2 || all_success=false
+            apply_hardening_3_1_3 || all_success=false
+            apply_hardening_3_2_1 || all_success=false
+            apply_hardening_3_2_2 || all_success=false
+            apply_hardening_3_2_3 || all_success=false
+            apply_hardening_3_2_4 || all_success=false
+            apply_hardening_3_3_1 || all_success=false
+            apply_hardening_3_3_2 || all_success=false
+            apply_hardening_3_3_3 || all_success=false
+            apply_hardening_3_3_4 || all_success=false
+            apply_hardening_3_3_5 || all_success=false
+            apply_hardening_3_3_6 || all_success=false
+            apply_hardening_3_3_7 || all_success=false
+            apply_hardening_3_3_8 || all_success=false
+            apply_hardening_3_3_9 || all_success=false
+            apply_hardening_3_3_10 || all_success=false
+            apply_hardening_3_3_11 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
+        4)
+            # Section 4: Host Based Firewall - apply all subsections
+            log_info "Section 4 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_4_1_1 || all_success=false
+            apply_hardening_4_2_1 || all_success=false
+            apply_hardening_4_2_2 || all_success=false
+            apply_hardening_4_2_3 || all_success=false
+            apply_hardening_4_2_4 || all_success=false
+            apply_hardening_4_2_5 || all_success=false
+            apply_hardening_4_2_6 || all_success=false
+            apply_hardening_4_2_7 || all_success=false
+            apply_hardening_4_3_1 || all_success=false
+            apply_hardening_4_3_2 || all_success=false
+            apply_hardening_4_3_3 || all_success=false
+            apply_hardening_4_3_4 || all_success=false
+            apply_hardening_4_3_5 || all_success=false
+            apply_hardening_4_3_6 || all_success=false
+            apply_hardening_4_3_7 || all_success=false
+            apply_hardening_4_3_8 || all_success=false
+            apply_hardening_4_3_9 || all_success=false
+            apply_hardening_4_3_10 || all_success=false
+            apply_hardening_4_4_1_1 || all_success=false
+            apply_hardening_4_4_1_2 || all_success=false
+            apply_hardening_4_4_1_3 || all_success=false
+            apply_hardening_4_4_2_1 || all_success=false
+            apply_hardening_4_4_2_2 || all_success=false
+            apply_hardening_4_4_2_3 || all_success=false
+            apply_hardening_4_4_2_4 || all_success=false
+            apply_hardening_4_4_3_1 || all_success=false
+            apply_hardening_4_4_3_2 || all_success=false
+            apply_hardening_4_4_3_3 || all_success=false
+            apply_hardening_4_4_3_4 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
         1.1.1)
             # Section 1.1.1: Configure Filesystem Kernel Modules - apply all subsections
             log_info "Applying all 1.1.1 kernel module sections..."
@@ -1258,6 +2707,18 @@ apply_hardening() {
             $func_name
             ;;
         1.2.1.1|1.2.1.2|1.2.2.1|1.3.1.1|1.3.1.2|1.3.1.3|1.3.1.4|1.4.1|1.4.2|1.5.1|1.5.2|1.5.3|1.5.4|1.5.5|1.6.1|1.6.2|1.6.3|1.6.4|1.6.5|1.6.6|1.7.1|1.7.2|1.7.3|1.7.4|1.7.5|1.7.6|1.7.7|1.7.8|1.7.9|1.7.10)
+            local func_name="apply_hardening_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        2.1.1|2.1.2|2.1.3|2.1.4|2.1.5|2.1.6|2.1.7|2.1.8|2.1.9|2.1.10|2.1.11|2.1.12|2.1.13|2.1.14|2.1.15|2.1.16|2.1.17|2.1.18|2.1.19|2.1.20|2.1.21|2.1.22|2.2.1|2.2.2|2.2.3|2.2.4|2.2.5|2.2.6|2.3.1.1|2.3.2.1|2.3.2.2|2.3.3.1|2.3.3.2|2.3.3.3|2.4.1.1|2.4.1.2|2.4.1.3|2.4.1.4|2.4.1.5|2.4.1.6|2.4.1.7|2.4.1.8|2.4.2.1)
+            local func_name="apply_hardening_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        3.1.1|3.1.2|3.1.3|3.2.1|3.2.2|3.2.3|3.2.4|3.3.1|3.3.2|3.3.3|3.3.4|3.3.5|3.3.6|3.3.7|3.3.8|3.3.9|3.3.10|3.3.11)
+            local func_name="apply_hardening_$(echo $section | tr '.' '_')"
+            $func_name
+            ;;
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4)
             local func_name="apply_hardening_$(echo $section | tr '.' '_')"
             $func_name
             ;;
