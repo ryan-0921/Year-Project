@@ -2197,6 +2197,1022 @@ check_compliance_4_4_3_4() {
 }
 apply_hardening_4_4_3_4() { [[ "$(get_active_firewall)" != "iptables" ]] && return 0; return 0; }
 
+###############################################################################
+# Section 5 - Access Control (SSH Server)
+###############################################################################
+
+# SSH configuration profiles (can be overridden via environment variables)
+# Supported values: cis_strict (default), extended
+: "${SSHD_CIPHERS_PROFILE:=cis_strict}"
+: "${SSHD_MACS_PROFILE:=cis_strict}"
+: "${SSHD_KEX_PROFILE:=cis_strict}"
+
+# Helper: Check if SSH server is installed
+sshd_installed() {
+    check_package_installed "openssh-server"
+}
+
+# Helper: Get effective sshd configuration using sshd -T
+get_sshd_effective_config() {
+    if ! sshd_installed; then
+        return 1
+    fi
+    if ! command -v sshd &>/dev/null; then
+        # On some systems sshd may be at /usr/sbin/sshd without PATH entry
+        if [[ -x /usr/sbin/sshd ]]; then
+            /usr/sbin/sshd -T -C user=root,addr=127.0.0.1,lport=22 2>/dev/null
+        else
+            return 1
+        fi
+    else
+        sshd -T -C user=root,addr=127.0.0.1,lport=22 2>/dev/null
+    fi
+}
+
+# Helper: Get a single sshd -T key's value
+get_sshd_effective_value() {
+    local key="$1"
+    get_sshd_effective_config | awk -v k="$key" '$1 == k { $1=""; sub(/^ /,""); print; exit }'
+}
+
+# Helper: Set or add an sshd_config option in /etc/ssh/sshd_config
+set_sshd_config_option() {
+    local key="$1"
+    local value="$2"
+    local file="/etc/ssh/sshd_config"
+
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skipping sshd option $key"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set $key in $file to '$value'"
+        return 0
+    fi
+
+    # Ensure file exists
+    if [[ ! -f "$file" ]]; then
+        touch "$file"
+    fi
+
+    backup_file "$file"
+
+    if grep -qE "^[[:space:]]*${key}\\b" "$file"; then
+        sed -ri "s|^[[:space:]]*${key}\\b.*|${key} ${value}|" "$file"
+    else
+        echo "${key} ${value}" >> "$file"
+    fi
+}
+
+# Helper: Expected values for Ciphers/MACs/KEX based on selected profiles
+get_sshd_ciphers_expected() {
+    case "$SSHD_CIPHERS_PROFILE" in
+        extended)
+            # Adds common GCM ciphers while remaining reasonably strong
+            echo "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+            ;;
+        cis_strict|*)
+            echo "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+            ;;
+    esac
+}
+
+get_sshd_macs_expected() {
+    case "$SSHD_MACS_PROFILE" in
+        extended)
+            # Includes non-ETM variants for broader compatibility
+            echo "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com,hmac-sha1"
+            ;;
+        cis_strict|*)
+            echo "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com,hmac-sha2-512,hmac-sha2-256,umac-128@openssh.com"
+            ;;
+    esac
+}
+
+get_sshd_kex_expected() {
+    case "$SSHD_KEX_PROFILE" in
+        extended)
+            # Adds diffie-hellman-group14-sha256 for wider client support
+            echo "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256"
+            ;;
+        cis_strict|*)
+            echo "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group-exchange-sha256"
+            ;;
+    esac
+}
+
+# 5.1.1 Ensure permissions on /etc/ssh/sshd_config are configured
+check_compliance_5_1_1() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.1"
+        return 0
+    fi
+    local ok=true
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        check_path_permissions "/etc/ssh/sshd_config" "600" "root" "root" || ok=false
+    else
+        log_warn "/etc/ssh/sshd_config does not exist"
+        ok=false
+    fi
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        while IFS= read -r -d '' f; do
+            check_path_permissions "$f" "600" "root" "root" || ok=false
+        done < <(find /etc/ssh/sshd_config.d -type f -name '*.conf' -print0 2>/dev/null)
+    fi
+    [[ "$ok" == true ]]
+}
+apply_hardening_5_1_1() {
+    if ! sshd_installed; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set permissions on sshd_config and included .conf files to 600 root:root"
+        return 0
+    fi
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        set_path_permissions "/etc/ssh/sshd_config" "600" "root" "root"
+    fi
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        while IFS= read -r -d '' f; do
+            set_path_permissions "$f" "600" "root" "root"
+        done < <(find /etc/ssh/sshd_config.d -type f -name '*.conf' -print0 2>/dev/null)
+    fi
+    return 0
+}
+
+# 5.1.2 Ensure permissions on SSH private host key files are configured
+check_compliance_5_1_2() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.2"
+        return 0
+    fi
+    local ok=true
+    while IFS= read -r -d '' f; do
+        local perm owner group
+        perm=$(stat -c '%a' "$f" 2>/dev/null || echo "")
+        owner=$(stat -c '%U' "$f" 2>/dev/null || echo "")
+        group=$(stat -c '%G' "$f" 2>/dev/null || echo "")
+        # Require no group/other permissions: [0-7]00
+        if [[ ! "$perm" =~ ^[0-7]00$ ]] || [[ "$owner" != "root" ]] || [[ "$group" != "root" ]]; then
+            log_warn "Private key '$f' has insecure permissions $perm $owner:$group"
+            ok=false
+        fi
+    done < <(find /etc/ssh -xdev -type f -name '*_key' ! -name '*.pub' -print0 2>/dev/null)
+    [[ "$ok" == true ]]
+}
+apply_hardening_5_1_2() {
+    if ! sshd_installed; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set SSH private host key files to 600 root:root"
+        return 0
+    fi
+    while IFS= read -r -d '' f; do
+        set_path_permissions "$f" "600" "root" "root"
+    done < <(find /etc/ssh -xdev -type f -name '*_key' ! -name '*.pub' -print0 2>/dev/null)
+    return 0
+}
+
+# 5.1.3 Ensure permissions on SSH public host key files are configured
+check_compliance_5_1_3() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.3"
+        return 0
+    fi
+    local ok=true
+    while IFS= read -r -d '' f; do
+        local perm owner group
+        perm=$(stat -c '%a' "$f" 2>/dev/null || echo "")
+        owner=$(stat -c '%U' "$f" 2>/dev/null || echo "")
+        group=$(stat -c '%G' "$f" 2>/dev/null || echo "")
+        # Require group/other not writable or executable
+        if [[ ! "$perm" =~ ^[0-7][0-4][0-4]$ ]] || [[ "$owner" != "root" ]] || [[ "$group" != "root" ]]; then
+            log_warn "Public key '$f' has insecure permissions $perm $owner:$group"
+            ok=false
+        fi
+    done < <(find /etc/ssh -xdev -type f -name '*.pub' -print0 2>/dev/null)
+    [[ "$ok" == true ]]
+}
+apply_hardening_5_1_3() {
+    if ! sshd_installed; then return 0; fi
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set SSH public host key files to 644 root:root"
+        return 0
+    fi
+    while IFS= read -r -d '' f; do
+        set_path_permissions "$f" "644" "root" "root"
+    done < <(find /etc/ssh -xdev -type f -name '*.pub' -print0 2>/dev/null)
+    return 0
+}
+
+# 5.1.4 Ensure sshd access is configured (Manual – site-specific users/groups)
+check_compliance_5_1_4() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.4"
+        return 0
+    fi
+    local cfg
+    cfg=$(get_sshd_effective_config)
+    if echo "$cfg" | grep -qiE '^(allowusers|allowgroups|denyusers|denygroups)[[:space:]]'; then
+        return 0
+    fi
+    log_warn "sshd access controls (AllowUsers/AllowGroups/DenyUsers/DenyGroups) are not configured - manual review required"
+    return 1
+}
+apply_hardening_5_1_4() {
+    log_warn "5.1.4 is site-specific - please configure AllowUsers/AllowGroups/DenyUsers/DenyGroups per policy"
+    return 0
+}
+
+# 5.1.5 Ensure sshd Banner is configured
+check_compliance_5_1_5() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.5"
+        return 0
+    fi
+    local banner
+    banner=$(get_sshd_effective_value "banner")
+    [[ "$banner" == "/etc/issue.net" ]] || return 1
+    [[ -f /etc/issue.net ]] || return 1
+    check_path_permissions "/etc/issue.net" "644" "root" "root"
+}
+apply_hardening_5_1_5() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "Banner" "/etc/issue.net"
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would ensure /etc/issue.net exists and set permissions to 644 root:root"
+        return 0
+    fi
+    [[ -f /etc/issue.net ]] || touch /etc/issue.net
+    set_path_permissions "/etc/issue.net" "644" "root" "root"
+    return 0
+}
+
+# 5.1.6 Ensure sshd Ciphers are configured
+check_compliance_5_1_6() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.6"
+        return 0
+    fi
+    local expected val
+    expected=$(get_sshd_ciphers_expected)
+    val=$(get_sshd_effective_value "ciphers")
+    [[ "$val" == "$expected" ]]
+}
+apply_hardening_5_1_6() {
+    if ! sshd_installed; then return 0; fi
+    local value
+    value=$(get_sshd_ciphers_expected)
+    set_sshd_config_option "Ciphers" "$value"
+    return 0
+}
+
+# 5.1.7 Ensure sshd ClientAliveInterval and ClientAliveCountMax are configured
+check_compliance_5_1_7() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.7"
+        return 0
+    fi
+    local interval count
+    interval=$(get_sshd_effective_value "clientaliveinterval")
+    count=$(get_sshd_effective_value "clientalivecountmax")
+    [[ "$interval" == "300" ]] && [[ "$count" == "3" ]]
+}
+apply_hardening_5_1_7() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "ClientAliveInterval" "300"
+    set_sshd_config_option "ClientAliveCountMax" "3"
+    return 0
+}
+
+# 5.1.8 Ensure sshd DisableForwarding is enabled
+check_compliance_5_1_8() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.8"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "disableforwarding")" == "yes" ]]
+}
+apply_hardening_5_1_8() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "DisableForwarding" "yes"
+    return 0
+}
+
+# 5.1.9 Ensure sshd GSSAPIAuthentication is disabled
+check_compliance_5_1_9() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.9"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "gssapiauthentication")" == "no" ]]
+}
+apply_hardening_5_1_9() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "GSSAPIAuthentication" "no"
+    return 0
+}
+
+# 5.1.10 Ensure sshd HostbasedAuthentication is disabled
+check_compliance_5_1_10() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.10"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "hostbasedauthentication")" == "no" ]]
+}
+apply_hardening_5_1_10() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "HostbasedAuthentication" "no"
+    return 0
+}
+
+# 5.1.11 Ensure sshd IgnoreRhosts is enabled
+check_compliance_5_1_11() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.11"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "ignorerhosts")" == "yes" ]]
+}
+apply_hardening_5_1_11() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "IgnoreRhosts" "yes"
+    return 0
+}
+
+# 5.1.12 Ensure sshd KexAlgorithms is configured
+check_compliance_5_1_12() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.12"
+        return 0
+    fi
+    local expected val
+    expected=$(get_sshd_kex_expected)
+    val=$(get_sshd_effective_value "kexalgorithms")
+    [[ "$val" == "$expected" ]]
+}
+apply_hardening_5_1_12() {
+    if ! sshd_installed; then return 0; fi
+    local value
+    value=$(get_sshd_kex_expected)
+    set_sshd_config_option "KexAlgorithms" "$value"
+    return 0
+}
+
+# 5.1.13 Ensure sshd LoginGraceTime is configured
+check_compliance_5_1_13() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.13"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "logingracetime")" == "60" ]]
+}
+apply_hardening_5_1_13() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "LoginGraceTime" "60"
+    return 0
+}
+
+# 5.1.14 Ensure sshd LogLevel is configured
+check_compliance_5_1_14() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.14"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "loglevel")" == "VERBOSE" ]]
+}
+apply_hardening_5_1_14() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "LogLevel" "VERBOSE"
+    return 0
+}
+
+# 5.1.15 Ensure sshd MACs are configured
+check_compliance_5_1_15() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.15"
+        return 0
+    fi
+    local expected val
+    expected=$(get_sshd_macs_expected)
+    val=$(get_sshd_effective_value "macs")
+    [[ "$val" == "$expected" ]]
+}
+apply_hardening_5_1_15() {
+    if ! sshd_installed; then return 0; fi
+    local value
+    value=$(get_sshd_macs_expected)
+    set_sshd_config_option "MACs" "$value"
+    return 0
+}
+
+# 5.1.16 Ensure sshd MaxAuthTries is configured
+check_compliance_5_1_16() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.16"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "maxauthtries")" == "4" ]]
+}
+apply_hardening_5_1_16() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "MaxAuthTries" "4"
+    return 0
+}
+
+# 5.1.17 Ensure sshd MaxSessions is configured
+check_compliance_5_1_17() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.17"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "maxsessions")" == "10" ]]
+}
+apply_hardening_5_1_17() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "MaxSessions" "10"
+    return 0
+}
+
+# 5.1.18 Ensure sshd MaxStartups is configured
+check_compliance_5_1_18() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.18"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "maxstartups")" == "10:30:60" ]]
+}
+apply_hardening_5_1_18() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "MaxStartups" "10:30:60"
+    return 0
+}
+
+# 5.1.19 Ensure sshd PermitEmptyPasswords is disabled
+check_compliance_5_1_19() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.19"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "permitemptypasswords")" == "no" ]]
+}
+apply_hardening_5_1_19() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "PermitEmptyPasswords" "no"
+    return 0
+}
+
+# 5.1.20 Ensure sshd PermitRootLogin is disabled
+check_compliance_5_1_20() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.20"
+        return 0
+    fi
+    local val
+    val=$(get_sshd_effective_value "permitrootlogin")
+    [[ "$val" == "no" ]] || [[ "$val" == "prohibit-password" ]]
+}
+apply_hardening_5_1_20() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "PermitRootLogin" "no"
+    return 0
+}
+
+# 5.1.21 Ensure sshd PermitUserEnvironment is disabled
+check_compliance_5_1_21() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.21"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "permituserenvironment")" == "no" ]]
+}
+apply_hardening_5_1_21() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "PermitUserEnvironment" "no"
+    return 0
+}
+
+# 5.1.22 Ensure sshd UsePAM is enabled
+check_compliance_5_1_22() {
+    if ! sshd_installed; then
+        log_info "openssh-server not installed - skip 5.1.22"
+        return 0
+    fi
+    [[ "$(get_sshd_effective_value "usepam")" == "yes" ]]
+}
+apply_hardening_5_1_22() {
+    if ! sshd_installed; then return 0; fi
+    set_sshd_config_option "UsePAM" "yes"
+    return 0
+}
+
+###############################################################################
+# Section 7 - System Maintenance
+###############################################################################
+
+# 7.1.1 Ensure permissions on /etc/passwd are configured
+check_compliance_7_1_1() {
+    [[ ! -e /etc/passwd ]] && { log_warn "/etc/passwd not found"; return 1; }
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/passwd 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/passwd 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/passwd 2>/dev/null || echo "")
+    (( 10#$perm <= 644 )) && [[ "$owner" == "root" ]] && [[ "$group" == "root" ]]
+}
+apply_hardening_7_1_1() {
+    [[ ! -e /etc/passwd ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/passwd to mode 644 root:root"
+        return 0
+    fi
+    chmod u-x,go-wx /etc/passwd 2>/dev/null || true
+    chown root:root /etc/passwd 2>/dev/null || true
+    return 0
+}
+
+# 7.1.2 Ensure permissions on /etc/passwd- are configured
+check_compliance_7_1_2() {
+    [[ ! -e /etc/passwd- ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/passwd- 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/passwd- 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/passwd- 2>/dev/null || echo "")
+    (( 10#$perm <= 644 )) && [[ "$owner" == "root" ]] && [[ "$group" == "root" ]]
+}
+apply_hardening_7_1_2() {
+    [[ ! -e /etc/passwd- ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/passwd- to mode 644 root:root"
+        return 0
+    fi
+    chmod u-x,go-wx /etc/passwd- 2>/dev/null || true
+    chown root:root /etc/passwd- 2>/dev/null || true
+    return 0
+}
+
+# 7.1.3 Ensure permissions on /etc/group are configured
+check_compliance_7_1_3() {
+    [[ ! -e /etc/group ]] && { log_warn "/etc/group not found"; return 1; }
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/group 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/group 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/group 2>/dev/null || echo "")
+    (( 10#$perm <= 644 )) && [[ "$owner" == "root" ]] && [[ "$group" == "root" ]]
+}
+apply_hardening_7_1_3() {
+    [[ ! -e /etc/group ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/group to mode 644 root:root"
+        return 0
+    fi
+    chmod u-x,go-wx /etc/group 2>/dev/null || true
+    chown root:root /etc/group 2>/dev/null || true
+    return 0
+}
+
+# 7.1.4 Ensure permissions on /etc/group- are configured
+check_compliance_7_1_4() {
+    [[ ! -e /etc/group- ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/group- 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/group- 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/group- 2>/dev/null || echo "")
+    (( 10#$perm <= 644 )) && [[ "$owner" == "root" ]] && [[ "$group" == "root" ]]
+}
+apply_hardening_7_1_4() {
+    [[ ! -e /etc/group- ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/group- to mode 644 root:root"
+        return 0
+    fi
+    chmod u-x,go-wx /etc/group- 2>/dev/null || true
+    chown root:root /etc/group- 2>/dev/null || true
+    return 0
+}
+
+# 7.1.5 Ensure permissions on /etc/shadow are configured
+check_compliance_7_1_5() {
+    [[ ! -e /etc/shadow ]] && { log_warn "/etc/shadow not found"; return 1; }
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/shadow 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/shadow 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/shadow 2>/dev/null || echo "")
+    (( 10#$perm <= 640 )) || return 1
+    [[ "$owner" == "root" ]] || return 1
+    [[ "$group" == "root" || "$group" == "shadow" ]]
+}
+apply_hardening_7_1_5() {
+    [[ ! -e /etc/shadow ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/shadow to mode 640 root:shadow (or root:root)"
+        return 0
+    fi
+    if getent group shadow &>/dev/null; then
+        chown root:shadow /etc/shadow 2>/dev/null || true
+    else
+        chown root:root /etc/shadow 2>/dev/null || true
+    fi
+    chmod u-x,g-wx,o-rwx /etc/shadow 2>/dev/null || true
+    return 0
+}
+
+# 7.1.6 Ensure permissions on /etc/shadow- are configured
+check_compliance_7_1_6() {
+    [[ ! -e /etc/shadow- ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/shadow- 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/shadow- 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/shadow- 2>/dev/null || echo "")
+    (( 10#$perm <= 640 )) || return 1
+    [[ "$owner" == "root" ]] || return 1
+    [[ "$group" == "root" || "$group" == "shadow" ]]
+}
+apply_hardening_7_1_6() {
+    [[ ! -e /etc/shadow- ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/shadow- to mode 640 root:shadow (or root:root)"
+        return 0
+    fi
+    if getent group shadow &>/dev/null; then
+        chown root:shadow /etc/shadow- 2>/dev/null || true
+    else
+        chown root:root /etc/shadow- 2>/dev/null || true
+    fi
+    chmod u-x,g-wx,o-rwx /etc/shadow- 2>/dev/null || true
+    return 0
+}
+
+# 7.1.7 Ensure permissions on /etc/gshadow are configured
+check_compliance_7_1_7() {
+    [[ ! -e /etc/gshadow ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/gshadow 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/gshadow 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/gshadow 2>/dev/null || echo "")
+    (( 10#$perm <= 640 )) && [[ "$owner" == "root" ]] && [[ "$group" == "shadow" ]]
+}
+apply_hardening_7_1_7() {
+    [[ ! -e /etc/gshadow ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/gshadow to mode 640 root:shadow"
+        return 0
+    fi
+    chown root:shadow /etc/gshadow 2>/dev/null || true
+    chmod u-x,g-wx,o-rwx /etc/gshadow 2>/dev/null || true
+    return 0
+}
+
+# 7.1.8 Ensure permissions on /etc/gshadow- are configured
+check_compliance_7_1_8() {
+    [[ ! -e /etc/gshadow- ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/gshadow- 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/gshadow- 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/gshadow- 2>/dev/null || echo "")
+    (( 10#$perm <= 640 )) && [[ "$owner" == "root" ]] && [[ "$group" == "shadow" ]]
+}
+apply_hardening_7_1_8() {
+    [[ ! -e /etc/gshadow- ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/gshadow- to mode 640 root:shadow"
+        return 0
+    fi
+    chown root:shadow /etc/gshadow- 2>/dev/null || true
+    chmod u-x,g-wx,o-rwx /etc/gshadow- 2>/dev/null || true
+    return 0
+}
+
+# 7.1.9 Ensure permissions on /etc/shells are configured
+check_compliance_7_1_9() {
+    [[ ! -e /etc/shells ]] && return 0
+    local perm owner group
+    perm=$(stat -Lc '%a' /etc/shells 2>/dev/null || echo "")
+    owner=$(stat -Lc '%U' /etc/shells 2>/dev/null || echo "")
+    group=$(stat -Lc '%G' /etc/shells 2>/dev/null || echo "")
+    (( 10#$perm <= 644 )) && [[ "$owner" == "root" ]] && [[ "$group" == "root" ]]
+}
+apply_hardening_7_1_9() {
+    [[ ! -e /etc/shells ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/shells to mode 644 root:root"
+        return 0
+    fi
+    chmod u-x,go-wx /etc/shells 2>/dev/null || true
+    chown root:root /etc/shells 2>/dev/null || true
+    return 0
+}
+
+# 7.1.10 Ensure permissions on /etc/security/opasswd are configured
+check_compliance_7_1_10() {
+    [[ ! -e /etc/security/opasswd && ! -e /etc/security/opasswd.old ]] && return 0
+    local ok=true
+    if [[ -e /etc/security/opasswd ]]; then
+        local perm owner group
+        perm=$(stat -Lc '%a' /etc/security/opasswd 2>/dev/null || echo "")
+        owner=$(stat -Lc '%U' /etc/security/opasswd 2>/dev/null || echo "")
+        group=$(stat -Lc '%G' /etc/security/opasswd 2>/dev/null || echo "")
+        if ! (( 10#$perm <= 600 )) || [[ "$owner" != "root" ]] || [[ "$group" != "root" ]]; then
+            ok=false
+        fi
+    fi
+    if [[ -e /etc/security/opasswd.old ]]; then
+        local perm owner group
+        perm=$(stat -Lc '%a' /etc/security/opasswd.old 2>/dev/null || echo "")
+        owner=$(stat -Lc '%U' /etc/security/opasswd.old 2>/dev/null || echo "")
+        group=$(stat -Lc '%G' /etc/security/opasswd.old 2>/dev/null || echo "")
+        if ! (( 10#$perm <= 600 )) || [[ "$owner" != "root" ]] || [[ "$group" != "root" ]]; then
+            ok=false
+        fi
+    fi
+    [[ "$ok" == true ]]
+}
+apply_hardening_7_1_10() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would set /etc/security/opasswd* to mode 600 root:root (if present)"
+        return 0
+    fi
+    if [[ -e /etc/security/opasswd ]]; then
+        chmod 600 /etc/security/opasswd 2>/dev/null || true
+        chown root:root /etc/security/opasswd 2>/dev/null || true
+    fi
+    if [[ -e /etc/security/opasswd.old ]]; then
+        chmod 600 /etc/security/opasswd.old 2>/dev/null || true
+        chown root:root /etc/security/opasswd.old 2>/dev/null || true
+    fi
+    return 0
+}
+
+# 7.1.11 Ensure world writable files and directories are secured (detection, manual remediation)
+check_compliance_7_1_11() {
+    local world_files world_dirs
+    world_files=$(find / -xdev \( -path "/proc/*" -o -path "/sys/*" -o -path "/run/user/*" -o -path "/snap/*" \) -prune -o -type f -perm -0002 -print 2>/dev/null)
+    world_dirs=$(find / -xdev \( -path "/proc/*" -o -path "/sys/*" -o -path "/run/user/*" -o -path "/snap/*" \) -prune -o -type d -perm -0002 ! -perm -1000 -print 2>/dev/null)
+    if [[ -z "$world_files" && -z "$world_dirs" ]]; then
+        return 0
+    fi
+    [[ -n "$world_files" ]] && log_warn "World-writable files detected:\n$world_files"
+    [[ -n "$world_dirs" ]] && log_warn "World-writable directories without sticky bit detected:\n$world_dirs"
+    return 1
+}
+apply_hardening_7_1_11() {
+    log_warn "7.1.11 remediation is environment-specific - review world-writable files/directories and fix manually"
+    return 0
+}
+
+# 7.1.12 Ensure no files or directories without an owner and a group exist (detection, manual remediation)
+check_compliance_7_1_12() {
+    local orphans
+    orphans=$(find / -xdev \( -path "/proc/*" -o -path "/sys/*" -o -path "/run/user/*" -o -path "/snap/*" \) -prune -o \( -nouser -o -nogroup \) -print 2>/dev/null)
+    if [[ -z "$orphans" ]]; then
+        return 0
+    fi
+    log_warn "Files/directories without owner or group detected:\n$orphans"
+    return 1
+}
+apply_hardening_7_1_12() {
+    log_warn "7.1.12 remediation is environment-specific - assign proper ownership to orphaned files manually"
+    return 0
+}
+
+# 7.1.13 Ensure SUID and SGID files are reviewed (Manual)
+check_compliance_7_1_13() {
+    log_info "7.1.13 is manual - review SUID/SGID files per site policy"
+    return 0
+}
+apply_hardening_7_1_13() {
+    log_warn "7.1.13 is manual - review and adjust SUID/SGID files per site policy"
+    return 0
+}
+
+###############################################################################
+# 7.2 Local User and Group Settings
+###############################################################################
+
+# 7.2.1 Ensure accounts in /etc/passwd use shadowed passwords
+check_compliance_7_2_1() {
+    awk -F: '($2 != "x") { print "User \"" $1 "\" is not using shadowed passwords" }' /etc/passwd | {
+        local out
+        out=$(cat)
+        [[ -z "$out" ]] && return 0
+        log_warn "$out"
+        return 1
+    }
+}
+apply_hardening_7_2_1() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would run pwconv to migrate passwords to /etc/shadow"
+        return 0
+    fi
+    if command -v pwconv &>/dev/null; then
+        pwconv 2>/dev/null || true
+    else
+        log_warn "pwconv not available - cannot automatically convert to shadow passwords"
+    fi
+    return 0
+}
+
+# 7.2.2 Ensure /etc/shadow password fields are not empty
+check_compliance_7_2_2() {
+    awk -F: '($2 == "") { print $1 " does not have a password" }' /etc/shadow | {
+        local out
+        out=$(cat)
+        [[ -z "$out" ]] && return 0
+        log_warn "$out"
+        return 1
+    }
+}
+apply_hardening_7_2_2() {
+    local users
+    users=$(awk -F: '($2 == "") { print $1 }' /etc/shadow)
+    [[ -z "$users" ]] && return 0
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would lock accounts with empty passwords: $users"
+        return 0
+    fi
+    local u
+    for u in $users; do
+        passwd -l "$u" 2>/dev/null || true
+    done
+    return 0
+}
+
+# 7.2.3 Ensure all groups in /etc/passwd exist in /etc/group (detection only)
+check_compliance_7_2_3() {
+    local missing
+    missing=$(awk -F: 'NR==FNR {g[$3]; next} !($4 in g) {print $1 " has missing GID " $4}' /etc/group /etc/passwd)
+    if [[ -z "$missing" ]]; then
+        return 0
+    fi
+    log_warn "Groups referenced in /etc/passwd but missing from /etc/group:\n$missing"
+    return 1
+}
+apply_hardening_7_2_3() {
+    log_warn "7.2.3 remediation (creating missing groups or adjusting users) requires manual review"
+    return 0
+}
+
+# 7.2.4 Ensure shadow group is empty
+check_compliance_7_2_4() {
+    local members
+    members=$(awk -F: '($1 == "shadow" && $4 != "") {print $4}' /etc/group)
+    [[ -z "$members" ]]
+}
+apply_hardening_7_2_4() {
+    local members
+    members=$(awk -F: '($1 == "shadow" && $4 != "") {print $4}' /etc/group | tr ',' ' ')
+    [[ -z "$members" ]] && return 0
+    log_warn "7.2.4 remediation is manual - remove these users from shadow group if not required: $members"
+    return 0
+}
+
+# 7.2.5 Ensure no duplicate UIDs exist (detection only)
+check_compliance_7_2_5() {
+    local dups
+    dups=$(awk -F: '{print $3}' /etc/passwd | sort | uniq -d)
+    if [[ -z "$dups" ]]; then
+        return 0
+    fi
+    local out=""
+    local uid
+    for uid in $dups; do
+        out+=$(awk -F: -v id="$uid" '($3==id){print "UID " id " used by user \"" $1 "\"" }' /etc/passwd; echo $'\n')
+    done
+    log_warn "Duplicate UIDs detected:\n$out"
+    return 1
+}
+apply_hardening_7_2_5() {
+    log_warn "7.2.5 (duplicate UIDs) requires manual remediation (reassign UIDs and fix ownerships)"
+    return 0
+}
+
+# 7.2.6 Ensure no duplicate GIDs exist (detection only)
+check_compliance_7_2_6() {
+    local dups
+    dups=$(awk -F: '{print $3}' /etc/group | sort | uniq -d)
+    if [[ -z "$dups" ]]; then
+        return 0
+    fi
+    local out="" gid
+    for gid in $dups; do
+        out+=$(awk -F: -v id="$gid" '($3==id){print "GID " id " used by group \"" $1 "\"" }' /etc/group; echo $'\n')
+    done
+    log_warn "Duplicate GIDs detected:\n$out"
+    return 1
+}
+apply_hardening_7_2_6() {
+    log_warn "7.2.6 (duplicate GIDs) requires manual remediation (reassign GIDs and fix ownerships)"
+    return 0
+}
+
+# 7.2.7 Ensure no duplicate user names exist (detection only)
+check_compliance_7_2_7() {
+    local dups
+    dups=$(awk -F: '{print $1}' /etc/passwd | sort | uniq -d)
+    if [[ -z "$dups" ]]; then
+        return 0
+    fi
+    log_warn "Duplicate user names detected:\n$dups"
+    return 1
+}
+apply_hardening_7_2_7() {
+    log_warn "7.2.7 (duplicate user names) requires manual remediation"
+    return 0
+}
+
+# 7.2.8 Ensure no duplicate group names exist (detection only)
+check_compliance_7_2_8() {
+    local dups
+    dups=$(awk -F: '{print $1}' /etc/group | sort | uniq -d)
+    if [[ -z "$dups" ]]; then
+        return 0
+    fi
+    log_warn "Duplicate group names detected:\n$dups"
+    return 1
+}
+apply_hardening_7_2_8() {
+    log_warn "7.2.8 (duplicate group names) requires manual remediation"
+    return 0
+}
+
+# Helper: list local interactive users (user home) based on shell not ending in nologin/false
+get_local_interactive_users() {
+    awk -F: '($7 !~ /(nologin|false)$/) {print $1 " " $6}' /etc/passwd
+}
+
+# 7.2.9 Ensure local interactive user home directories are configured
+check_compliance_7_2_9() {
+    local ok=true
+    while read -r user home; do
+        [[ -z "$user" || -z "$home" ]] && continue
+        if [[ ! -d "$home" ]]; then
+            log_warn "Home directory for user \"$user\" does not exist: $home"
+            ok=false
+            continue
+        fi
+        local perm owner
+        perm=$(stat -Lc '%a' "$home" 2>/dev/null || echo "")
+        owner=$(stat -Lc '%U' "$home" 2>/dev/null || echo "")
+        # Require owner is user and no group/other write permissions
+        if [[ "$owner" != "$user" ]] || ! [[ "$perm" =~ ^[0-7][0-5][0-5]$ ]]; then
+            log_warn "Home directory \"$home\" for user \"$user\" has insecure ownership/permissions ($perm, owner=$owner)"
+            ok=false
+        fi
+    done <<< "$(get_local_interactive_users)"
+    [[ "$ok" == true ]]
+}
+apply_hardening_7_2_9() {
+    if [[ "$DRY_RUN" == true ]]; then
+        log_dryrun "Would fix ownership and permissions on local interactive user home directories"
+        return 0
+    fi
+    while read -r user home; do
+        [[ -z "$user" || -z "$home" ]] && continue
+        [[ -d "$home" ]] || continue
+        chown "$user":"$(id -gn "$user" 2>/dev/null || echo "$user")" "$home" 2>/dev/null || true
+        chmod go-w "$home" 2>/dev/null || true
+    done <<< "$(get_local_interactive_users)"
+    return 0
+}
+
+# 7.2.10 Ensure local interactive user dot files access is configured (detection only)
+check_compliance_7_2_10() {
+    local ok=true
+    while read -r user home; do
+        [[ -z "$user" || -z "$home" ]] && continue
+        [[ -d "$home" ]] || continue
+        # Flag dangerous dotfiles
+        local f
+        for f in ".forward" ".rhost"; do
+            if [[ -e "$home/$f" ]]; then
+                log_warn "User \"$user\" has disallowed file $home/$f"
+                ok=false
+            fi
+        done
+        # .netrc and .bash_history permission checks
+        if [[ -e "$home/.netrc" ]]; then
+            local perm
+            perm=$(stat -Lc '%a' "$home/.netrc" 2>/dev/null || echo "")
+            if ! [[ "$perm" =~ ^[0-6]00$ ]]; then
+                log_warn "User \"$user\" .netrc has insecure permissions ($perm)"
+                ok=false
+            fi
+        fi
+        if [[ -e "$home/.bash_history" ]]; then
+            local perm
+            perm=$(stat -Lc '%a' "$home/.bash_history" 2>/dev/null || echo "")
+            if ! [[ "$perm" =~ ^[0-6]00$ ]]; then
+                log_warn "User \"$user\" .bash_history has insecure permissions ($perm)"
+                ok=false
+            fi
+        fi
+    done <<< "$(get_local_interactive_users)"
+    [[ "$ok" == true ]]
+}
+apply_hardening_7_2_10() {
+    log_warn "7.2.10 remediation (dot file cleanup/perms) is site-specific - please review reported issues"
+    return 0
+}
+
+
 # Check if a section is already compliant
 check_compliance() {
     local section="$1"
@@ -2352,6 +3368,63 @@ check_compliance() {
             check_compliance_3_3_11 || all_compliant=false
             [[ "$all_compliant" == true ]] && return 0 || return 1
             ;;
+        5)
+            # Section 5: Access Control (SSH) - check all subsections
+            log_info "Section 5 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_5_1_1 || all_compliant=false
+            check_compliance_5_1_2 || all_compliant=false
+            check_compliance_5_1_3 || all_compliant=false
+            check_compliance_5_1_4 || all_compliant=false
+            check_compliance_5_1_5 || all_compliant=false
+            check_compliance_5_1_6 || all_compliant=false
+            check_compliance_5_1_7 || all_compliant=false
+            check_compliance_5_1_8 || all_compliant=false
+            check_compliance_5_1_9 || all_compliant=false
+            check_compliance_5_1_10 || all_compliant=false
+            check_compliance_5_1_11 || all_compliant=false
+            check_compliance_5_1_12 || all_compliant=false
+            check_compliance_5_1_13 || all_compliant=false
+            check_compliance_5_1_14 || all_compliant=false
+            check_compliance_5_1_15 || all_compliant=false
+            check_compliance_5_1_16 || all_compliant=false
+            check_compliance_5_1_17 || all_compliant=false
+            check_compliance_5_1_18 || all_compliant=false
+            check_compliance_5_1_19 || all_compliant=false
+            check_compliance_5_1_20 || all_compliant=false
+            check_compliance_5_1_21 || all_compliant=false
+            check_compliance_5_1_22 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
+        7)
+            # Section 7: System Maintenance - check all subsections
+            log_info "Section 7 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_7_1_1 || all_compliant=false
+            check_compliance_7_1_2 || all_compliant=false
+            check_compliance_7_1_3 || all_compliant=false
+            check_compliance_7_1_4 || all_compliant=false
+            check_compliance_7_1_5 || all_compliant=false
+            check_compliance_7_1_6 || all_compliant=false
+            check_compliance_7_1_7 || all_compliant=false
+            check_compliance_7_1_8 || all_compliant=false
+            check_compliance_7_1_9 || all_compliant=false
+            check_compliance_7_1_10 || all_compliant=false
+            check_compliance_7_1_11 || all_compliant=false
+            check_compliance_7_1_12 || all_compliant=false
+            check_compliance_7_1_13 || all_compliant=false
+            check_compliance_7_2_1 || all_compliant=false
+            check_compliance_7_2_2 || all_compliant=false
+            check_compliance_7_2_3 || all_compliant=false
+            check_compliance_7_2_4 || all_compliant=false
+            check_compliance_7_2_5 || all_compliant=false
+            check_compliance_7_2_6 || all_compliant=false
+            check_compliance_7_2_7 || all_compliant=false
+            check_compliance_7_2_8 || all_compliant=false
+            check_compliance_7_2_9 || all_compliant=false
+            check_compliance_7_2_10 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
         4)
             # Section 4: Host Based Firewall - check all subsections
             log_info "Section 4 includes multiple subsections. Checking all..."
@@ -2449,7 +3522,7 @@ check_compliance() {
             local func_name="check_compliance_$(echo $section | tr '.' '_')"
             $func_name
             ;;
-        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4)
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
             local func_name="check_compliance_$(echo $section | tr '.' '_')"
             $func_name
             ;;
@@ -2621,6 +3694,63 @@ apply_hardening() {
             apply_hardening_3_3_11 || all_success=false
             [[ "$all_success" == true ]] && return 0 || return 1
             ;;
+        5)
+            # Section 5: Access Control (SSH) - apply all subsections
+            log_info "Section 5 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_5_1_1 || all_success=false
+            apply_hardening_5_1_2 || all_success=false
+            apply_hardening_5_1_3 || all_success=false
+            apply_hardening_5_1_4 || all_success=false
+            apply_hardening_5_1_5 || all_success=false
+            apply_hardening_5_1_6 || all_success=false
+            apply_hardening_5_1_7 || all_success=false
+            apply_hardening_5_1_8 || all_success=false
+            apply_hardening_5_1_9 || all_success=false
+            apply_hardening_5_1_10 || all_success=false
+            apply_hardening_5_1_11 || all_success=false
+            apply_hardening_5_1_12 || all_success=false
+            apply_hardening_5_1_13 || all_success=false
+            apply_hardening_5_1_14 || all_success=false
+            apply_hardening_5_1_15 || all_success=false
+            apply_hardening_5_1_16 || all_success=false
+            apply_hardening_5_1_17 || all_success=false
+            apply_hardening_5_1_18 || all_success=false
+            apply_hardening_5_1_19 || all_success=false
+            apply_hardening_5_1_20 || all_success=false
+            apply_hardening_5_1_21 || all_success=false
+            apply_hardening_5_1_22 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
+        7)
+            # Section 7: System Maintenance - apply all subsections
+            log_info "Section 7 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_7_1_1 || all_success=false
+            apply_hardening_7_1_2 || all_success=false
+            apply_hardening_7_1_3 || all_success=false
+            apply_hardening_7_1_4 || all_success=false
+            apply_hardening_7_1_5 || all_success=false
+            apply_hardening_7_1_6 || all_success=false
+            apply_hardening_7_1_7 || all_success=false
+            apply_hardening_7_1_8 || all_success=false
+            apply_hardening_7_1_9 || all_success=false
+            apply_hardening_7_1_10 || all_success=false
+            apply_hardening_7_1_11 || all_success=false
+            apply_hardening_7_1_12 || all_success=false
+            apply_hardening_7_1_13 || all_success=false
+            apply_hardening_7_2_1 || all_success=false
+            apply_hardening_7_2_2 || all_success=false
+            apply_hardening_7_2_3 || all_success=false
+            apply_hardening_7_2_4 || all_success=false
+            apply_hardening_7_2_5 || all_success=false
+            apply_hardening_7_2_6 || all_success=false
+            apply_hardening_7_2_7 || all_success=false
+            apply_hardening_7_2_8 || all_success=false
+            apply_hardening_7_2_9 || all_success=false
+            apply_hardening_7_2_10 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
         4)
             # Section 4: Host Based Firewall - apply all subsections
             log_info "Section 4 includes multiple subsections. Applying all..."
@@ -2718,7 +3848,7 @@ apply_hardening() {
             local func_name="apply_hardening_$(echo $section | tr '.' '_')"
             $func_name
             ;;
-        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4)
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
             local func_name="apply_hardening_$(echo $section | tr '.' '_')"
             $func_name
             ;;
