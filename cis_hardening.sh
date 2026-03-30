@@ -35,6 +35,12 @@ VERIFY_ONLY=false
 # Array to track backed up files for tar.gz compression
 BACKED_UP_FILES=()
 
+# Section 6 (Logging and Auditing) — implementations in cis_section6.sh
+if [[ -f "${SCRIPT_DIR}/cis_section6.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/cis_section6.sh"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -690,8 +696,8 @@ apply_hardening_1_2_2_1() { log_warn "Section 1.2.2.1 is Manual - run 'apt updat
 # Section 1.3 - Mandatory Access Control / AppArmor
 ###############################################################################
 
-check_compliance_1_3_1_1() { check_package_installed "apparmor" && command -v aa-status >/dev/null 2>&1; }
-apply_hardening_1_3_1_1() { if [[ "$DRY_RUN" == false ]]; then apt-get install -y apparmor 2>/dev/null || true; systemctl enable apparmor.service 2>/dev/null || true; systemctl start apparmor.service 2>/dev/null || true; sleep 1; else log_dryrun "Would install apparmor package"; fi; }
+check_compliance_1_3_1_1() { check_package_installed "apparmor"; }
+apply_hardening_1_3_1_1() { if [[ "$DRY_RUN" == false ]]; then DEBIAN_FRONTEND=noninteractive apt-get install -y apparmor apparmor-utils 2>/dev/null || true; else log_dryrun "Would install apparmor and apparmor-utils"; fi; }
 check_compliance_1_3_1_2() { check_file_contains "/etc/default/grub" "apparmor=1"; }
 apply_hardening_1_3_1_2() { ensure_file_line "/etc/default/grub" 'GRUB_CMDLINE_LINUX="apparmor=1 security=apparmor"' "apparmor=1"; }
 check_compliance_1_3_1_3() { if ! command -v aa-status >/dev/null 2>&1; then return 1; fi; local status_output=$(aa-status 2>/dev/null); if [[ -z "$status_output" ]]; then return 1; fi; local total_profiles=$(echo "$status_output" | grep -E "[0-9]+\s+profiles are loaded" | grep -oE "[0-9]+" | head -1); local enforce_profiles=$(echo "$status_output" | grep -E "[0-9]+\s+profiles are in enforce mode" | grep -oE "[0-9]+" | head -1); local complain_profiles=$(echo "$status_output" | grep -E "[0-9]+\s+profiles are in complain mode" | grep -oE "[0-9]+" | head -1); enforce_profiles=${enforce_profiles:-0}; complain_profiles=${complain_profiles:-0}; total_profiles=${total_profiles:-0}; if [[ "$total_profiles" -eq 0 ]]; then return 1; fi; [[ $((enforce_profiles + complain_profiles)) -eq "$total_profiles" ]] && return 0 || return 1; }
@@ -3418,6 +3424,74 @@ check_compliance() {
             check_compliance_5_1_22 || all_compliant=false
             [[ "$all_compliant" == true ]] && return 0 || return 1
             ;;
+        6)
+            # Section 6: Logging and Auditing - check all subsections
+            log_info "Section 6 includes multiple subsections. Checking all..."
+            local all_compliant=true
+            check_compliance_6_1_1_1 || all_compliant=false
+            check_compliance_6_1_1_2 || all_compliant=false
+            check_compliance_6_1_1_3 || all_compliant=false
+            check_compliance_6_1_1_4 || all_compliant=false
+            check_compliance_6_1_2_1_1 || all_compliant=false
+            check_compliance_6_1_2_1_2 || all_compliant=false
+            check_compliance_6_1_2_1_3 || all_compliant=false
+            check_compliance_6_1_2_1_4 || all_compliant=false
+            check_compliance_6_1_2_2 || all_compliant=false
+            check_compliance_6_1_2_3 || all_compliant=false
+            check_compliance_6_1_2_4 || all_compliant=false
+            check_compliance_6_1_3_1 || all_compliant=false
+            check_compliance_6_1_3_2 || all_compliant=false
+            check_compliance_6_1_3_3 || all_compliant=false
+            check_compliance_6_1_3_4 || all_compliant=false
+            check_compliance_6_1_3_5 || all_compliant=false
+            check_compliance_6_1_3_6 || all_compliant=false
+            check_compliance_6_1_3_7 || all_compliant=false
+            check_compliance_6_1_3_8 || all_compliant=false
+            check_compliance_6_1_4_1 || all_compliant=false
+            check_compliance_6_2_1_1 || all_compliant=false
+            check_compliance_6_2_1_2 || all_compliant=false
+            check_compliance_6_2_1_3 || all_compliant=false
+            check_compliance_6_2_1_4 || all_compliant=false
+            check_compliance_6_2_2_1 || all_compliant=false
+            check_compliance_6_2_2_2 || all_compliant=false
+            check_compliance_6_2_2_3 || all_compliant=false
+            check_compliance_6_2_2_4 || all_compliant=false
+            check_compliance_6_2_3_1 || all_compliant=false
+            check_compliance_6_2_3_2 || all_compliant=false
+            check_compliance_6_2_3_3 || all_compliant=false
+            check_compliance_6_2_3_4 || all_compliant=false
+            check_compliance_6_2_3_5 || all_compliant=false
+            check_compliance_6_2_3_6 || all_compliant=false
+            check_compliance_6_2_3_7 || all_compliant=false
+            check_compliance_6_2_3_8 || all_compliant=false
+            check_compliance_6_2_3_9 || all_compliant=false
+            check_compliance_6_2_3_10 || all_compliant=false
+            check_compliance_6_2_3_11 || all_compliant=false
+            check_compliance_6_2_3_12 || all_compliant=false
+            check_compliance_6_2_3_13 || all_compliant=false
+            check_compliance_6_2_3_14 || all_compliant=false
+            check_compliance_6_2_3_15 || all_compliant=false
+            check_compliance_6_2_3_16 || all_compliant=false
+            check_compliance_6_2_3_17 || all_compliant=false
+            check_compliance_6_2_3_18 || all_compliant=false
+            check_compliance_6_2_3_19 || all_compliant=false
+            check_compliance_6_2_3_20 || all_compliant=false
+            check_compliance_6_2_3_21 || all_compliant=false
+            check_compliance_6_2_4_1 || all_compliant=false
+            check_compliance_6_2_4_2 || all_compliant=false
+            check_compliance_6_2_4_3 || all_compliant=false
+            check_compliance_6_2_4_4 || all_compliant=false
+            check_compliance_6_2_4_5 || all_compliant=false
+            check_compliance_6_2_4_6 || all_compliant=false
+            check_compliance_6_2_4_7 || all_compliant=false
+            check_compliance_6_2_4_8 || all_compliant=false
+            check_compliance_6_2_4_9 || all_compliant=false
+            check_compliance_6_2_4_10 || all_compliant=false
+            check_compliance_6_3_1 || all_compliant=false
+            check_compliance_6_3_2 || all_compliant=false
+            check_compliance_6_3_3 || all_compliant=false
+            [[ "$all_compliant" == true ]] && return 0 || return 1
+            ;;
         7)
             # Section 7: System Maintenance - check all subsections
             log_info "Section 7 includes multiple subsections. Checking all..."
@@ -3544,7 +3618,7 @@ check_compliance() {
             local func_name="check_compliance_$(echo $section | tr '.' '_')"
             $func_name
             ;;
-        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|6.1.1.1|6.1.1.2|6.1.1.3|6.1.1.4|6.1.2.1.1|6.1.2.1.2|6.1.2.1.3|6.1.2.1.4|6.1.2.2|6.1.2.3|6.1.2.4|6.1.3.1|6.1.3.2|6.1.3.3|6.1.3.4|6.1.3.5|6.1.3.6|6.1.3.7|6.1.3.8|6.1.4.1|6.2.1.1|6.2.1.2|6.2.1.3|6.2.1.4|6.2.2.1|6.2.2.2|6.2.2.3|6.2.2.4|6.2.3.1|6.2.3.2|6.2.3.3|6.2.3.4|6.2.3.5|6.2.3.6|6.2.3.7|6.2.3.8|6.2.3.9|6.2.3.10|6.2.3.11|6.2.3.12|6.2.3.13|6.2.3.14|6.2.3.15|6.2.3.16|6.2.3.17|6.2.3.18|6.2.3.19|6.2.3.20|6.2.3.21|6.2.4.1|6.2.4.2|6.2.4.3|6.2.4.4|6.2.4.5|6.2.4.6|6.2.4.7|6.2.4.8|6.2.4.9|6.2.4.10|6.3.1|6.3.2|6.3.3|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
             local func_name="check_compliance_$(echo $section | tr '.' '_')"
             $func_name
             ;;
@@ -3744,6 +3818,74 @@ apply_hardening() {
             apply_hardening_5_1_22 || all_success=false
             [[ "$all_success" == true ]] && return 0 || return 1
             ;;
+        6)
+            # Section 6: Logging and Auditing - apply all subsections
+            log_info "Section 6 includes multiple subsections. Applying all..."
+            local all_success=true
+            apply_hardening_6_1_1_1 || all_success=false
+            apply_hardening_6_1_1_2 || all_success=false
+            apply_hardening_6_1_1_3 || all_success=false
+            apply_hardening_6_1_1_4 || all_success=false
+            apply_hardening_6_1_2_1_1 || all_success=false
+            apply_hardening_6_1_2_1_2 || all_success=false
+            apply_hardening_6_1_2_1_3 || all_success=false
+            apply_hardening_6_1_2_1_4 || all_success=false
+            apply_hardening_6_1_2_2 || all_success=false
+            apply_hardening_6_1_2_3 || all_success=false
+            apply_hardening_6_1_2_4 || all_success=false
+            apply_hardening_6_1_3_1 || all_success=false
+            apply_hardening_6_1_3_2 || all_success=false
+            apply_hardening_6_1_3_3 || all_success=false
+            apply_hardening_6_1_3_4 || all_success=false
+            apply_hardening_6_1_3_5 || all_success=false
+            apply_hardening_6_1_3_6 || all_success=false
+            apply_hardening_6_1_3_7 || all_success=false
+            apply_hardening_6_1_3_8 || all_success=false
+            apply_hardening_6_1_4_1 || all_success=false
+            apply_hardening_6_2_1_1 || all_success=false
+            apply_hardening_6_2_1_2 || all_success=false
+            apply_hardening_6_2_1_3 || all_success=false
+            apply_hardening_6_2_1_4 || all_success=false
+            apply_hardening_6_2_2_1 || all_success=false
+            apply_hardening_6_2_2_2 || all_success=false
+            apply_hardening_6_2_2_3 || all_success=false
+            apply_hardening_6_2_2_4 || all_success=false
+            apply_hardening_6_2_3_1 || all_success=false
+            apply_hardening_6_2_3_2 || all_success=false
+            apply_hardening_6_2_3_3 || all_success=false
+            apply_hardening_6_2_3_4 || all_success=false
+            apply_hardening_6_2_3_5 || all_success=false
+            apply_hardening_6_2_3_6 || all_success=false
+            apply_hardening_6_2_3_7 || all_success=false
+            apply_hardening_6_2_3_8 || all_success=false
+            apply_hardening_6_2_3_9 || all_success=false
+            apply_hardening_6_2_3_10 || all_success=false
+            apply_hardening_6_2_3_11 || all_success=false
+            apply_hardening_6_2_3_12 || all_success=false
+            apply_hardening_6_2_3_13 || all_success=false
+            apply_hardening_6_2_3_14 || all_success=false
+            apply_hardening_6_2_3_15 || all_success=false
+            apply_hardening_6_2_3_16 || all_success=false
+            apply_hardening_6_2_3_17 || all_success=false
+            apply_hardening_6_2_3_18 || all_success=false
+            apply_hardening_6_2_3_19 || all_success=false
+            apply_hardening_6_2_3_20 || all_success=false
+            apply_hardening_6_2_3_21 || all_success=false
+            apply_hardening_6_2_4_1 || all_success=false
+            apply_hardening_6_2_4_2 || all_success=false
+            apply_hardening_6_2_4_3 || all_success=false
+            apply_hardening_6_2_4_4 || all_success=false
+            apply_hardening_6_2_4_5 || all_success=false
+            apply_hardening_6_2_4_6 || all_success=false
+            apply_hardening_6_2_4_7 || all_success=false
+            apply_hardening_6_2_4_8 || all_success=false
+            apply_hardening_6_2_4_9 || all_success=false
+            apply_hardening_6_2_4_10 || all_success=false
+            apply_hardening_6_3_1 || all_success=false
+            apply_hardening_6_3_2 || all_success=false
+            apply_hardening_6_3_3 || all_success=false
+            [[ "$all_success" == true ]] && return 0 || return 1
+            ;;
         7)
             # Section 7: System Maintenance - apply all subsections
             log_info "Section 7 includes multiple subsections. Applying all..."
@@ -3870,7 +4012,7 @@ apply_hardening() {
             local func_name="apply_hardening_$(echo $section | tr '.' '_')"
             $func_name
             ;;
-        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
+        4.1.1|4.2.1|4.2.2|4.2.3|4.2.4|4.2.5|4.2.6|4.2.7|4.3.1|4.3.2|4.3.3|4.3.4|4.3.5|4.3.6|4.3.7|4.3.8|4.3.9|4.3.10|4.4.1.1|4.4.1.2|4.4.1.3|4.4.2.1|4.4.2.2|4.4.2.3|4.4.2.4|4.4.3.1|4.4.3.2|4.4.3.3|4.4.3.4|5.1.1|5.1.2|5.1.3|5.1.4|5.1.5|5.1.6|5.1.7|5.1.8|5.1.9|5.1.10|5.1.11|5.1.12|5.1.13|5.1.14|5.1.15|5.1.16|5.1.17|5.1.18|5.1.19|5.1.20|5.1.21|5.1.22|6.1.1.1|6.1.1.2|6.1.1.3|6.1.1.4|6.1.2.1.1|6.1.2.1.2|6.1.2.1.3|6.1.2.1.4|6.1.2.2|6.1.2.3|6.1.2.4|6.1.3.1|6.1.3.2|6.1.3.3|6.1.3.4|6.1.3.5|6.1.3.6|6.1.3.7|6.1.3.8|6.1.4.1|6.2.1.1|6.2.1.2|6.2.1.3|6.2.1.4|6.2.2.1|6.2.2.2|6.2.2.3|6.2.2.4|6.2.3.1|6.2.3.2|6.2.3.3|6.2.3.4|6.2.3.5|6.2.3.6|6.2.3.7|6.2.3.8|6.2.3.9|6.2.3.10|6.2.3.11|6.2.3.12|6.2.3.13|6.2.3.14|6.2.3.15|6.2.3.16|6.2.3.17|6.2.3.18|6.2.3.19|6.2.3.20|6.2.3.21|6.2.4.1|6.2.4.2|6.2.4.3|6.2.4.4|6.2.4.5|6.2.4.6|6.2.4.7|6.2.4.8|6.2.4.9|6.2.4.10|6.3.1|6.3.2|6.3.3|7.1.1|7.1.2|7.1.3|7.1.4|7.1.5|7.1.6|7.1.7|7.1.8|7.1.9|7.1.10|7.1.11|7.1.12|7.1.13|7.2.1|7.2.2|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.9|7.2.10)
             local func_name="apply_hardening_$(echo $section | tr '.' '_')"
             $func_name
             ;;
@@ -3989,7 +4131,7 @@ cis_subsection_skip_post_verify() {
         1.1.1.10|1.1.2.1.1|1.1.2.2.1|1.1.2.3.1|1.1.2.4.1|1.1.2.5.1|1.1.2.6.1|1.1.2.7.1|1.2.1.1|1.2.1.2|1.2.2.1|1.4.1)
             return 0
             ;;
-        4.2.5|4.3.3|4.3.7|4.4.2.3|4.4.3.3|5.1.4|7.1.11|7.1.12|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.10)
+        4.2.5|4.3.3|4.3.7|4.4.2.3|4.4.3.3|5.1.4|6.1.1.2|6.1.1.3|6.1.2.1.2|6.1.3.5|6.1.3.6|6.1.3.8|6.2.3.6|6.2.3.7|6.2.3.14|6.2.3.20|6.2.3.21|7.1.11|7.1.12|7.2.3|7.2.4|7.2.5|7.2.6|7.2.7|7.2.8|7.2.10)
             return 0
             ;;
     esac
@@ -4162,6 +4304,19 @@ process_section_multi_detailed() {
             subs=(
                 5.1.1 5.1.2 5.1.3 5.1.4 5.1.5 5.1.6 5.1.7 5.1.8 5.1.9 5.1.10 5.1.11 5.1.12 5.1.13 5.1.14 5.1.15
                 5.1.16 5.1.17 5.1.18 5.1.19 5.1.20 5.1.21 5.1.22
+            )
+            ;;
+        6)
+            subs=(
+                6.1.1.1 6.1.1.2 6.1.1.3 6.1.1.4
+                6.1.2.1.1 6.1.2.1.2 6.1.2.1.3 6.1.2.1.4 6.1.2.2 6.1.2.3 6.1.2.4
+                6.1.3.1 6.1.3.2 6.1.3.3 6.1.3.4 6.1.3.5 6.1.3.6 6.1.3.7 6.1.3.8
+                6.1.4.1
+                6.2.1.1 6.2.1.2 6.2.1.3 6.2.1.4
+                6.2.2.1 6.2.2.2 6.2.2.3 6.2.2.4
+                6.2.3.1 6.2.3.2 6.2.3.3 6.2.3.4 6.2.3.5 6.2.3.6 6.2.3.7 6.2.3.8 6.2.3.9 6.2.3.10 6.2.3.11 6.2.3.12 6.2.3.13 6.2.3.14 6.2.3.15 6.2.3.16 6.2.3.17 6.2.3.18 6.2.3.19 6.2.3.20 6.2.3.21
+                6.2.4.1 6.2.4.2 6.2.4.3 6.2.4.4 6.2.4.5 6.2.4.6 6.2.4.7 6.2.4.8 6.2.4.9 6.2.4.10
+                6.3.1 6.3.2 6.3.3
             )
             ;;
         7)
@@ -4340,12 +4495,12 @@ process_section() {
         process_section_1_detailed
         return $?
     fi
-    if [[ "$section" =~ ^[23457]$ ]]; then
+    if [[ "$section" =~ ^[234567]$ ]]; then
         process_section_multi_detailed "$section"
         return $?
     fi
     
-    # Standard processing for other sections (e.g. single subsection IDs, or section 6 when wired)
+    # Standard processing for other sections (e.g. single subsection IDs)
     local status=""
     local message=""
     local dry_run_suffix=""
